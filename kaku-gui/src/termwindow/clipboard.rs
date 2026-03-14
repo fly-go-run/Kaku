@@ -141,15 +141,6 @@ impl TermWindow {
         self.show_toast("Copied".to_string());
     }
 
-    /// Explain once per window when auto-copy is intentionally disabled.
-    pub fn show_copy_on_select_disabled_hint(&mut self) {
-        if self.selection_copy_disabled_hint_shown {
-            return;
-        }
-        self.selection_copy_disabled_hint_shown = true;
-        self.show_toast_for("Auto copy disabled. Use Cmd+C to copy.".to_string(), 2200);
-    }
-
     pub fn paste_from_clipboard(&mut self, pane: &Arc<dyn Pane>, clipboard: ClipboardPasteSource) {
         let targets = self.terminal_input_targets(pane);
         let pane_ids: Vec<_> = targets.iter().map(|pane| pane.pane_id()).collect();
