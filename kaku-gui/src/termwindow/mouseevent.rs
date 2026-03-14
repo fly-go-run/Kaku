@@ -10,7 +10,7 @@ use ::window::{
 use config::keyassignment::{KeyAssignment, MouseEventTrigger, SpawnTabDomain};
 use config::MouseEventAltScreen;
 use mux::pane::{CachePolicy, Pane, WithPaneLines};
-use mux::tab::SplitDirection;
+use mux::tab::{SplitDirection, TabId};
 use mux::Mux;
 use mux_lua::MuxPane;
 use std::convert::TryInto;
@@ -72,6 +72,25 @@ fn should_preserve_tmux_bypass_reporting(
         && modifiers.contains(bypass_modifiers)
 }
 
+/// Pure slot-resolution algorithm for tab drag reorder.
+///
+/// Given a list of `(midpoint_x, tab_index)` for all tabs except the dragged one,
+/// returns the visual slot where the dragged tab should be inserted.
+///
+/// Finds the first tab whose midpoint is strictly to the right of `overlay_center_x`
+/// and returns that slot. If no midpoint is greater, returns the last slot (append).
+pub(crate) fn compute_target_slot(
+    non_dragged_midpoints: &[(isize, usize)],
+    overlay_center_x: isize,
+) -> usize {
+    for (slot, &(mid_x, _tab_idx)) in non_dragged_midpoints.iter().enumerate() {
+        if mid_x > overlay_center_x {
+            return slot;
+        }
+    }
+    non_dragged_midpoints.len()
+}
+
 impl super::TermWindow {
     const TAB_DRAG_THRESHOLD: isize = 6;
 
@@ -80,11 +99,19 @@ impl super::TermWindow {
         self.current_mouse_buttons.retain(|p| p != &press);
     }
 
-    fn start_tab_drag(&mut self, tab_idx: usize, start_event: MouseEvent) {
+    fn start_tab_drag(&mut self, tab_idx: usize, tab_id: TabId, start_event: MouseEvent) {
+        let start_bounds = match self.tab_ui_item(tab_idx) {
+            Some(bounds) => bounds,
+            None => return,
+        };
         self.tab_drag_state = Some(super::TabDragState {
-            tab_idx,
+            tab_id,
             start_event,
+            start_bounds,
+            source_slot_idx: tab_idx,
+            target_slot_idx: tab_idx,
             has_dragged: false,
+            overlay_offset_x: 0,
         });
     }
 
@@ -105,26 +132,18 @@ impl super::TermWindow {
         })
     }
 
-    fn drag_tab_target_idx(&self, current_tab_idx: usize, cursor_x: isize) -> Option<usize> {
-        if let Some(prev_idx) = current_tab_idx.checked_sub(1) {
-            if let Some(prev) = self.tab_ui_item(prev_idx) {
-                let prev_mid_x = prev.x as isize + prev.width as isize / 2;
-                if cursor_x < prev_mid_x {
-                    return Some(prev_idx);
-                }
-            }
-        }
-
-        if current_tab_idx < self.last_tab_index()? {
-            if let Some(next) = self.tab_ui_item(current_tab_idx + 1) {
-                let next_mid_x = next.x as isize + next.width as isize / 2;
-                if cursor_x > next_mid_x {
-                    return Some(current_tab_idx + 1);
-                }
-            }
-        }
-
-        None
+    /// Collect non-dragged tab midpoints and delegate to the pure algorithm.
+    fn compute_target_slot_idx(&self, dragged_tab_idx: usize, overlay_center_x: isize) -> usize {
+        let last = self.last_tab_index().unwrap_or(0);
+        let midpoints: Vec<(isize, usize)> = (0..=last)
+            .filter(|&idx| idx != dragged_tab_idx)
+            .filter_map(|idx| {
+                let item = self.tab_ui_item(idx)?;
+                let mid_x = item.x as isize + item.width as isize / 2;
+                Some((mid_x, idx))
+            })
+            .collect();
+        compute_target_slot(&midpoints, overlay_center_x)
     }
 
     fn begin_tab_rename(&mut self, tab_idx: usize, item: UIItem) -> anyhow::Result<()> {
@@ -144,12 +163,31 @@ impl super::TermWindow {
     }
 
     fn drag_tab(&mut self, event: &MouseEvent, context: &dyn WindowOps) -> bool {
+        if !self.config.mouse_drag_reorders_tabs {
+            if self
+                .tab_drag_state
+                .as_ref()
+                .is_some_and(|state| state.has_dragged)
+            {
+                self.invalidate_fancy_tab_bar();
+                context.invalidate();
+            }
+            self.tab_drag_state = None;
+            return false;
+        }
+
         let Some(mut state) = self.tab_drag_state.take() else {
             return false;
         };
 
+        // Stale drag cleanup: if the left button is no longer held, cancel.
         if event.mouse_buttons != WMB::LEFT {
-            self.tab_drag_state = Some(state);
+            if state.has_dragged {
+                self.invalidate_fancy_tab_bar();
+                context.invalidate();
+            }
+            self.finish_mouse_release(MousePress::Left);
+            // Don't commit — just drop the drag silently.
             return false;
         }
 
@@ -160,22 +198,48 @@ impl super::TermWindow {
             return true;
         }
 
+        if !state.has_dragged {
+            // First frame of a real drag: force the base strip to rebuild without
+            // the dragged tab so we don't render a duplicate underneath the overlay.
+            self.invalidate_fancy_tab_bar();
+        }
         state.has_dragged = true;
+        state.overlay_offset_x = event.coords.x - state.start_event.coords.x;
 
-        let target_idx = self.drag_tab_target_idx(state.tab_idx, event.coords.x);
-
-        if let Some(target_idx) = target_idx {
-            if target_idx != state.tab_idx {
-                if let Err(err) = self.move_tab(target_idx) {
-                    log::debug!("move_tab({target_idx}) failed while dragging tab: {err:#}");
-                } else {
-                    state.tab_idx = target_idx;
+        // Resolve the dragged tab's current mux index from its stable TabId.
+        let mux = Mux::get();
+        let dragged_tab_idx = match mux
+            .get_window(self.mux_window_id)
+            .and_then(|w| w.idx_by_id(state.tab_id))
+        {
+            Some(idx) => idx,
+            None => {
+                // Tab disappeared mid-drag — cancel.
+                log::debug!("tab {:?} disappeared during drag, cancelling", state.tab_id);
+                if state.has_dragged {
+                    self.invalidate_fancy_tab_bar();
                     context.invalidate();
                 }
+                self.finish_mouse_release(MousePress::Left);
+                return false;
             }
+        };
+
+        let overlay_center_x = state.start_bounds.x as isize
+            + state.overlay_offset_x
+            + state.start_bounds.width as isize / 2;
+
+        let new_target = self.compute_target_slot_idx(dragged_tab_idx, overlay_center_x);
+        let old_target = state.target_slot_idx;
+        state.target_slot_idx = new_target;
+
+        if new_target != old_target {
+            // The base strip layout changed — fancy tab bar cache must be rebuilt.
+            self.invalidate_fancy_tab_bar();
         }
 
         self.tab_drag_state = Some(state);
+        context.invalidate();
         true
     }
 
@@ -364,9 +428,24 @@ impl super::TermWindow {
                     self.finish_mouse_release(*press);
                     return;
                 }
-                if press == &MousePress::Left && self.tab_drag_state.take().is_some() {
-                    self.finish_mouse_release(*press);
-                    return;
+                if press == &MousePress::Left {
+                    if let Some(state) = self.tab_drag_state.take() {
+                        if state.has_dragged {
+                            if let Err(err) = self
+                                .move_specific_tab_to_slot(state.tab_id, state.target_slot_idx)
+                            {
+                                log::debug!(
+                                    "move_specific_tab_to_slot({:?}, {}) failed: {err:#}",
+                                    state.tab_id,
+                                    state.target_slot_idx,
+                                );
+                            }
+                            self.invalidate_fancy_tab_bar();
+                            context.invalidate();
+                        }
+                        self.finish_mouse_release(*press);
+                        return;
+                    }
                 }
             }
 
@@ -761,6 +840,8 @@ impl super::TermWindow {
     ) {
         match event.kind {
             WMEK::Press(MousePress::Left) => {
+                self.is_window_dragging = false;
+                self.window_drag_position = None;
                 log::debug!("Should close tab {}", idx);
                 self.close_specific_tab(idx, false);
             }
@@ -831,6 +912,10 @@ impl super::TermWindow {
         match event.kind {
             WMEK::Press(MousePress::Left) => match item {
                 TabBarItem::Tab { tab_idx, active } => {
+                    // A real tab interaction wins over the generic title-strip
+                    // window-drag protection set earlier in mouse_event_impl.
+                    self.is_window_dragging = false;
+                    self.window_drag_position = None;
                     if self.last_mouse_click.as_ref().map(|c| c.streak) == Some(2) {
                         self.tab_drag_state = None;
                         if let Err(err) = self.begin_tab_rename(tab_idx, ui_item) {
@@ -844,9 +929,20 @@ impl super::TermWindow {
                             log::debug!("activate_tab({tab_idx}) failed: {err:#}");
                         }
                     }
-                    self.start_tab_drag(tab_idx, event.clone());
+                    if self.config.mouse_drag_reorders_tabs {
+                        let tab_id = Mux::get()
+                            .get_window(self.mux_window_id)
+                            .and_then(|w| w.get_by_idx(tab_idx).map(|t| t.tab_id()));
+                        if let Some(tab_id) = tab_id {
+                            self.start_tab_drag(tab_idx, tab_id, event.clone());
+                        }
+                    } else {
+                        self.tab_drag_state = None;
+                    }
                 }
                 TabBarItem::NewTabButton { .. } => {
+                    self.is_window_dragging = false;
+                    self.window_drag_position = None;
                     self.tab_drag_state = None;
                     self.do_new_tab_button_click(MousePress::Left);
                 }
@@ -875,6 +971,8 @@ impl super::TermWindow {
                     context.request_drag_move();
                 }
                 TabBarItem::WindowButton(button) => {
+                    self.is_window_dragging = false;
+                    self.window_drag_position = None;
                     self.tab_drag_state = None;
                     use window::IntegratedTitleButton as Button;
                     if let Some(ref window) = self.window {
@@ -1615,5 +1713,81 @@ mod tests {
             false,
             true,
         ));
+    }
+
+    // ── compute_target_slot tests ──
+
+    use super::compute_target_slot;
+
+    /// Helper: create midpoints for tabs of equal width at regular intervals.
+    /// Returns midpoints for all tabs except `skip_idx`.
+    fn equal_tabs(count: usize, width: isize, skip_idx: usize) -> Vec<(isize, usize)> {
+        (0..count)
+            .filter(|&i| i != skip_idx)
+            .map(|i| {
+                let x = i as isize * width;
+                let mid = x + width / 2;
+                (mid, i)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn slot_insert_at_beginning() {
+        // 4 tabs, each 100px wide, dragging tab 3.
+        // Overlay center at 10 — should go before tab 0's midpoint (50).
+        let mids = equal_tabs(4, 100, 3);
+        assert_eq!(compute_target_slot(&mids, 10), 0);
+    }
+
+    #[test]
+    fn slot_insert_at_end() {
+        // 4 tabs, dragging tab 0. Overlay center at 400 — past all midpoints.
+        let mids = equal_tabs(4, 100, 0);
+        assert_eq!(compute_target_slot(&mids, 400), 3);
+    }
+
+    #[test]
+    fn slot_insert_in_middle() {
+        // 5 tabs, dragging tab 0. Overlay at 220 — between tab 2 (mid=250) and tab 1 (mid=150).
+        // Non-dragged: [1(150), 2(250), 3(350), 4(450)]
+        // 220 > 150, 220 < 250 → slot 1.
+        let mids = equal_tabs(5, 100, 0);
+        assert_eq!(compute_target_slot(&mids, 220), 1);
+    }
+
+    #[test]
+    fn slot_no_move_same_position() {
+        // 3 tabs, dragging tab 1 (mid originally at 150).
+        // Non-dragged: [0(50), 2(250)]. Overlay center at 150.
+        // 150 > 50, 150 < 250 → slot 1. This means "between tab 0 and tab 2",
+        // which is the original position → no-op.
+        let mids = equal_tabs(3, 100, 1);
+        assert_eq!(compute_target_slot(&mids, 150), 1);
+    }
+
+    #[test]
+    fn slot_variable_width_tabs() {
+        // Tab 0: [0..80] mid=40, Tab 1: [80..200] mid=140, Tab 2: [200..350] mid=275
+        // Dragging tab 0. Non-dragged: [(140,1), (275,2)].
+        // Overlay center at 200: 200 > 140, 200 < 275 → slot 1.
+        let mids = vec![(140, 1), (275, 2)];
+        assert_eq!(compute_target_slot(&mids, 200), 1);
+    }
+
+    #[test]
+    fn slot_single_tab_returns_zero() {
+        // Only one tab, and it's being dragged. Non-dragged is empty.
+        let mids: Vec<(isize, usize)> = vec![];
+        assert_eq!(compute_target_slot(&mids, 50), 0);
+    }
+
+    #[test]
+    fn slot_fast_move_across_multiple_tabs() {
+        // 6 tabs, dragging tab 0. Overlay jumps all the way to 520.
+        // Non-dragged: [1(150), 2(250), 3(350), 4(450), 5(550)]
+        // 520 > 450, 520 < 550 → slot 4.
+        let mids = equal_tabs(6, 100, 0);
+        assert_eq!(compute_target_slot(&mids, 520), 4);
     }
 }

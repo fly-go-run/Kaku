@@ -504,6 +504,22 @@ impl UIItem {
     }
 }
 
+/// Render-only snapshot derived from `TabDragState` each frame.
+/// Tab bar builders receive this instead of the full runtime drag state.
+#[derive(Clone, Debug)]
+pub struct TabDragRenderInfo {
+    /// Current mux tab index of the dragged tab (resolved from TabId each frame).
+    pub dragged_tab_idx: usize,
+    /// The visual slot the tab was originally in.
+    pub source_slot_idx: usize,
+    /// The visual slot where the spacer should appear.
+    pub target_slot_idx: usize,
+    /// Horizontal position of the overlay in pixels.
+    pub overlay_left_px: f32,
+    /// Width of the overlay in pixels.
+    pub overlay_width_px: f32,
+}
+
 #[derive(Clone, Default)]
 pub struct SemanticZoneCache {
     seqno: SequenceNo,
@@ -694,10 +710,22 @@ struct SplitDragState {
 }
 
 /// State tracked during a live tab drag-reorder gesture.
+///
+/// Identity is based on `TabId` so the drag remains stable even if
+/// tab indices shift due to unrelated events (e.g. a tab closing).
 struct TabDragState {
-    tab_idx: usize,
+    tab_id: TabId,
     start_event: MouseEvent,
+    /// The UIItem bounds of the pressed tab at drag start, used as the overlay anchor.
+    start_bounds: UIItem,
+    /// Visual slot index where the tab originally lived.
+    source_slot_idx: usize,
+    /// Visual slot index where the tab would be inserted on release.
+    target_slot_idx: usize,
+    /// Set to true once movement exceeds the drag threshold.
     has_dragged: bool,
+    /// Horizontal pixel offset of the overlay relative to `start_bounds.x`.
+    overlay_offset_x: isize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3254,6 +3282,65 @@ impl TermWindow {
         self.update_scrollbar();
 
         Ok(())
+    }
+
+    /// Move a specific tab (identified by `TabId`) to `target_slot_idx`.
+    /// Unlike `move_tab` which always operates on the active tab, this
+    /// resolves the tab by its stable id, making it safe for drag-release
+    /// commit even if the active tab changed during the drag.
+    fn move_specific_tab_to_slot(
+        &mut self,
+        tab_id: TabId,
+        target_slot_idx: usize,
+    ) -> anyhow::Result<()> {
+        let mux = Mux::get();
+        let mut window = mux
+            .get_window_mut(self.mux_window_id)
+            .ok_or_else(|| anyhow!("no such window"))?;
+
+        let source_idx = window
+            .idx_by_id(tab_id)
+            .ok_or_else(|| anyhow!("tab {tab_id:?} no longer exists in this window"))?;
+
+        let max = window.len();
+        let clamped = target_slot_idx.min(max.saturating_sub(1));
+
+        if source_idx == clamped {
+            return Ok(());
+        }
+
+        let tab_inst = window.remove_by_idx(source_idx);
+        window.insert(clamped, &tab_inst);
+        window.set_active_without_saving(clamped);
+
+        drop(window);
+        self.update_title();
+        self.update_scrollbar();
+
+        Ok(())
+    }
+
+    /// Build a `TabDragRenderInfo` snapshot from the current `TabDragState`,
+    /// resolving `TabId` to the live tab index. Returns `None` if there is
+    /// no active drag or the tab no longer exists.
+    pub(crate) fn tab_drag_render_info(&self) -> Option<TabDragRenderInfo> {
+        let state = self.tab_drag_state.as_ref()?;
+        if !state.has_dragged {
+            return None;
+        }
+
+        let mux = Mux::get();
+        let window = mux.get_window(self.mux_window_id)?;
+        let dragged_tab_idx = window.idx_by_id(state.tab_id)?;
+        drop(window);
+
+        Some(TabDragRenderInfo {
+            dragged_tab_idx,
+            source_slot_idx: state.source_slot_idx,
+            target_slot_idx: state.target_slot_idx,
+            overlay_left_px: (state.start_bounds.x as isize + state.overlay_offset_x) as f32,
+            overlay_width_px: state.start_bounds.width as f32,
+        })
     }
 
     fn show_input_selector(&mut self, args: &config::keyassignment::InputSelector) {

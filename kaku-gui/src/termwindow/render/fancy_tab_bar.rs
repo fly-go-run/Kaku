@@ -4,7 +4,7 @@ use crate::termwindow::box_model::*;
 use crate::termwindow::render::corners::*;
 
 use crate::termwindow::render::window_buttons::window_button_element;
-use crate::termwindow::{UIItem, UIItemType};
+use crate::termwindow::{TabDragRenderInfo, UIItem, UIItemType};
 use crate::utilsprites::RenderMetrics;
 use config::{Dimension, DimensionContext, TabBarColors};
 use std::rc::Rc;
@@ -329,6 +329,9 @@ impl crate::TermWindow {
             );
         }
 
+        let drag_info = self.tab_drag_render_info();
+        let mut tab_slot = 0usize;
+
         for item in items {
             match item.item {
                 TabBarItem::LeftStatus => left_status.push(item_to_elem(item)),
@@ -343,6 +346,26 @@ impl crate::TermWindow {
                     }
                 }
                 TabBarItem::Tab { tab_idx, active } => {
+                    // During drag: skip the dragged tab entirely.
+                    if drag_info
+                        .as_ref()
+                        .map_or(false, |d| tab_idx == d.dragged_tab_idx)
+                    {
+                        continue;
+                    }
+
+                    // Insert a transparent spacer at the target slot.
+                    if let Some(ref d) = drag_info {
+                        if tab_slot == d.target_slot_idx {
+                            left_eles.push(
+                                Element::new(&font, ElementContent::Text("".to_string()))
+                                    .min_width(Some(Dimension::Pixels(d.overlay_width_px)))
+                                    .min_height(Some(Dimension::Pixels(tab_bar_height * 0.6)))
+                                    .colors(bar_colors.clone()),
+                            );
+                        }
+                    }
+
                     let mut elem = item_to_elem(item);
                     elem.max_width = Some(Dimension::Pixels(max_tab_width));
                     elem.content = match elem.content {
@@ -356,8 +379,21 @@ impl crate::TermWindow {
                         }
                     };
                     left_eles.push(elem);
+                    tab_slot += 1;
                 }
                 _ => left_eles.push(item_to_elem(item)),
+            }
+        }
+
+        // If target slot is at the very end, insert spacer after all tabs.
+        if let Some(ref d) = drag_info {
+            if tab_slot <= d.target_slot_idx {
+                left_eles.push(
+                    Element::new(&font, ElementContent::Text("".to_string()))
+                        .min_width(Some(Dimension::Pixels(d.overlay_width_px)))
+                        .min_height(Some(Dimension::Pixels(tab_bar_height * 0.6)))
+                        .colors(bar_colors.clone()),
+                );
             }
         }
 
@@ -477,6 +513,113 @@ impl crate::TermWindow {
         self.render_element(&computed, gl_state, None)?;
 
         Ok(ui_items)
+    }
+
+    /// Build and paint a standalone element for the dragged tab overlay.
+    pub fn paint_fancy_tab_drag_overlay(
+        &mut self,
+        info: &TabDragRenderInfo,
+        tab_bar_y: f32,
+        tab_bar_height: f32,
+    ) -> anyhow::Result<()> {
+        let font = self.fonts.title_font()?;
+        let metrics = RenderMetrics::with_font_metrics(&font.metrics());
+        let palette = self.palette().clone();
+        let colors = self
+            .config
+            .colors
+            .as_ref()
+            .and_then(|c| c.tab_bar.as_ref())
+            .cloned()
+            .unwrap_or_else(TabBarColors::default);
+
+        // Find the dragged tab's entry.
+        let dragged_entry = self.tab_bar.items().iter().find(|e| {
+            matches!(
+                e.item,
+                TabBarItem::Tab { tab_idx, .. } if tab_idx == info.dragged_tab_idx
+            )
+        });
+        let dragged_entry = match dragged_entry {
+            Some(e) => e,
+            None => return Ok(()),
+        };
+        let active = matches!(dragged_entry.item, TabBarItem::Tab { active: true, .. });
+
+        // Build a minimal element for the dragged tab.
+        let elem_content = Element::with_line(&font, &dragged_entry.title, &palette);
+        let active_tab_colors = colors.active_tab();
+        let inactive_tab_colors = colors.inactive_tab();
+        let tab_colors = if active {
+            &active_tab_colors
+        } else {
+            &inactive_tab_colors
+        };
+
+        let tab_padding_h = Dimension::Pixels((0.5 * metrics.cell_size.width as f32) + 4.0);
+        let tab_bottom_padding = Dimension::Cells(0.25);
+
+        let overlay_elem = elem_content
+            .vertical_align(VerticalAlign::Bottom)
+            .padding(BoxDimension {
+                left: tab_padding_h,
+                right: tab_padding_h,
+                top: Dimension::Cells(0.2),
+                bottom: tab_bottom_padding,
+            })
+            .border(BoxDimension::new(Dimension::Pixels(1.)))
+            .border_corners(Some(Corners {
+                top_left: SizedPoly {
+                    width: Dimension::Cells(0.5),
+                    height: Dimension::Cells(0.5),
+                    poly: TOP_LEFT_ROUNDED_CORNER,
+                },
+                top_right: SizedPoly {
+                    width: Dimension::Cells(0.5),
+                    height: Dimension::Cells(0.5),
+                    poly: TOP_RIGHT_ROUNDED_CORNER,
+                },
+                bottom_left: SizedPoly::none(),
+                bottom_right: SizedPoly::none(),
+            }))
+            .colors(ElementColors {
+                border: BorderColor::new(tab_colors.bg_color.to_linear()),
+                bg: tab_colors.bg_color.to_linear().into(),
+                text: tab_colors.fg_color.to_linear().into(),
+            })
+            .min_width(Some(Dimension::Pixels(info.overlay_width_px)))
+            .display(DisplayType::Block)
+            .zindex(100);
+
+        let computed = self.compute_element(
+            &LayoutContext {
+                height: DimensionContext {
+                    dpi: self.dimensions.dpi as f32,
+                    pixel_max: self.dimensions.pixel_height as f32,
+                    pixel_cell: metrics.cell_size.height as f32,
+                },
+                width: DimensionContext {
+                    dpi: self.dimensions.dpi as f32,
+                    pixel_max: self.dimensions.pixel_width as f32,
+                    pixel_cell: metrics.cell_size.width as f32,
+                },
+                bounds: euclid::rect(
+                    info.overlay_left_px,
+                    tab_bar_y,
+                    info.overlay_width_px,
+                    tab_bar_height,
+                ),
+                metrics: &metrics,
+                gl_state: self.render_state.as_ref().unwrap(),
+                zindex: 100,
+            },
+            &overlay_elem,
+        )?;
+
+        let gl_state = self.render_state.as_ref().unwrap();
+        self.render_element(&computed, gl_state, None)?;
+
+        Ok(())
     }
 }
 

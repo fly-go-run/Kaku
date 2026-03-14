@@ -35,8 +35,8 @@ pub enum TabBarItem {
 pub struct TabEntry {
     pub item: TabBarItem,
     pub title: Line,
-    x: usize,
-    width: usize,
+    pub x: usize,
+    pub width: usize,
 }
 
 #[derive(Clone, Debug)]
