@@ -4,7 +4,7 @@ use crate::termwindow::box_model::*;
 use crate::termwindow::render::corners::*;
 
 use crate::termwindow::render::window_buttons::window_button_element;
-use crate::termwindow::{TabDragRenderInfo, UIItem, UIItemType};
+use crate::termwindow::{TabDragRenderInfo, TabDragVisualMode, UIItem, UIItemType};
 use crate::utilsprites::RenderMetrics;
 use config::{Dimension, DimensionContext, TabBarColors};
 use std::rc::Rc;
@@ -356,7 +356,11 @@ impl crate::TermWindow {
 
                     // Insert a transparent spacer at the target slot.
                     if let Some(ref d) = drag_info {
-                        if tab_slot == d.target_slot_idx {
+                        if matches!(
+                            d.mode,
+                            TabDragVisualMode::Reorder { target_slot_idx }
+                                if tab_slot == target_slot_idx
+                        ) {
                             left_eles.push(
                                 Element::new(&font, ElementContent::Text("".to_string()))
                                     .min_width(Some(Dimension::Pixels(d.overlay_width_px)))
@@ -387,7 +391,10 @@ impl crate::TermWindow {
 
         // If target slot is at the very end, insert spacer after all tabs.
         if let Some(ref d) = drag_info {
-            if tab_slot <= d.target_slot_idx {
+            if matches!(
+                d.mode,
+                TabDragVisualMode::Reorder { target_slot_idx } if tab_slot <= target_slot_idx
+            ) {
                 left_eles.push(
                     Element::new(&font, ElementContent::Text("".to_string()))
                         .min_width(Some(Dimension::Pixels(d.overlay_width_px)))
@@ -516,12 +523,7 @@ impl crate::TermWindow {
     }
 
     /// Build and paint a standalone element for the dragged tab overlay.
-    pub fn paint_fancy_tab_drag_overlay(
-        &mut self,
-        info: &TabDragRenderInfo,
-        tab_bar_y: f32,
-        tab_bar_height: f32,
-    ) -> anyhow::Result<()> {
+    pub fn paint_fancy_tab_drag_overlay(&mut self, info: &TabDragRenderInfo) -> anyhow::Result<()> {
         let font = self.fonts.title_font()?;
         let metrics = RenderMetrics::with_font_metrics(&font.metrics());
         let palette = self.palette().clone();
@@ -605,9 +607,9 @@ impl crate::TermWindow {
                 },
                 bounds: euclid::rect(
                     info.overlay_left_px,
-                    tab_bar_y,
+                    info.overlay_top_px,
                     info.overlay_width_px,
-                    tab_bar_height,
+                    info.overlay_height_px,
                 ),
                 metrics: &metrics,
                 gl_state: self.render_state.as_ref().unwrap(),

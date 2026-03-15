@@ -487,6 +487,78 @@ pub struct Window {
     id: usize,
 }
 
+/// Shrink the window **frame** (title bar included) so it fits entirely
+/// within the visible area of the nearest screen.  This is a one-shot
+/// adjustment used at creation time because we disable
+/// `constrainFrameRect:toScreen:` for tiling-WM compat.
+///
+/// We avoid `[window screen]` because it returns nil for windows that have
+/// not been ordered-front yet.
+fn fit_window_within_visible_screen(window: *mut Object) {
+    unsafe {
+        let frame = NSWindow::frame(window);
+
+        // Find the visible frame of the nearest screen by iterating manually,
+        // since [window screen] is nil for unshown windows.
+        let screens = NSScreen::screens(nil);
+        if screens.is_null() || screens.count() == 0 {
+            return;
+        }
+        let center_x = frame.origin.x + frame.size.width / 2.0;
+        let center_y = frame.origin.y + frame.size.height / 2.0;
+        let mut best_visible: Option<NSRect> = None;
+        let mut best_dist_sq = f64::INFINITY;
+        for idx in 0..screens.count() {
+            let screen = screens.objectAtIndex(idx);
+            let sf: NSRect = NSScreen::frame(screen);
+            // Distance from frame center to screen rect center.
+            let sx = sf.origin.x + sf.size.width / 2.0;
+            let sy = sf.origin.y + sf.size.height / 2.0;
+            let d = (center_x - sx).powi(2) + (center_y - sy).powi(2);
+            if d < best_dist_sq {
+                best_dist_sq = d;
+                let vis: NSRect = msg_send![screen, visibleFrame];
+                best_visible = Some(vis);
+            }
+        }
+        let Some(visible) = best_visible else {
+            return;
+        };
+
+        let mut new_frame = frame;
+
+        // Clamp width / height to the visible area.
+        if new_frame.size.width > visible.size.width {
+            new_frame.size.width = visible.size.width;
+        }
+        if new_frame.size.height > visible.size.height {
+            new_frame.size.height = visible.size.height;
+        }
+
+        // Shift origin so the entire frame stays within the visible rect.
+        if new_frame.origin.x < visible.origin.x {
+            new_frame.origin.x = visible.origin.x;
+        }
+        if new_frame.origin.x + new_frame.size.width > visible.origin.x + visible.size.width {
+            new_frame.origin.x = visible.origin.x + visible.size.width - new_frame.size.width;
+        }
+        if new_frame.origin.y < visible.origin.y {
+            new_frame.origin.y = visible.origin.y;
+        }
+        if new_frame.origin.y + new_frame.size.height > visible.origin.y + visible.size.height {
+            new_frame.origin.y = visible.origin.y + visible.size.height - new_frame.size.height;
+        }
+
+        let changed = new_frame.origin.x != frame.origin.x
+            || new_frame.origin.y != frame.origin.y
+            || new_frame.size.width != frame.size.width
+            || new_frame.size.height != frame.size.height;
+        if changed {
+            NSWindow::setFrame_display_(window, new_frame, NO);
+        }
+    }
+}
+
 fn set_window_position(window: *mut Object, coords: ScreenPoint) {
     unsafe {
         let cartesian = screen_point_to_cartesian(coords);
@@ -500,6 +572,27 @@ fn set_window_position(window: *mut Object, coords: ScreenPoint) {
         );
         NSWindow::setFrameOrigin_(window, point);
     }
+}
+
+fn resolve_initial_window_geometry(
+    width: usize,
+    height: usize,
+    x: Option<i32>,
+    y: Option<i32>,
+    scale_factor: usize,
+) -> (usize, usize, Option<ScreenPoint>) {
+    let width = width / scale_factor;
+    let height = height / scale_factor;
+
+    // Explicit positions are already stored as screen-space backing pixels.
+    // `set_window_position` converts them to Cocoa points, so scaling them here
+    // would shift the window toward the top-left on Retina displays.
+    let explicit_initial_pos = match (x, y) {
+        (Some(x), Some(y)) => Some(ScreenPoint::new(x as isize, y as isize)),
+        _ => None,
+    };
+
+    (width, height, explicit_initial_pos)
 }
 
 const MIN_RESTORE_WIDTH: usize = 200;
@@ -884,15 +977,8 @@ impl Window {
         } = conn.resolve_geometry(geometry);
 
         let scale_factor = (conn.default_dpi() / crate::DEFAULT_DPI) as usize;
-        let mut width = width / scale_factor;
-        let mut height = height / scale_factor;
-        let x = x.map(|x| x / scale_factor as i32);
-        let y = y.map(|y| y / scale_factor as i32);
-
-        let explicit_initial_pos = match (x, y) {
-            (Some(x), Some(y)) => Some(ScreenPoint::new(x as isize, y as isize)),
-            _ => None,
-        };
+        let (mut width, mut height, explicit_initial_pos) =
+            resolve_initial_window_geometry(width, height, x, y, scale_factor);
         let is_first_window = conn.windows.borrow().is_empty();
         let remembered_initial_pos = if explicit_initial_pos.is_none() && is_first_window {
             last_closed_window_position()
@@ -994,6 +1080,10 @@ impl Window {
             if let Some(pos) = explicit_initial_pos {
                 // Put it where they asked it to be.
                 set_window_position(*window, pos);
+                // constrainFrameRect:toScreen: is disabled for tiling-WM compat,
+                // so manually shrink the frame to fit the visible screen when a
+                // window is programmatically placed (e.g. tab drag-detach).
+                fit_window_within_visible_screen(*window);
             } else if let Some(pos) = remembered_initial_pos {
                 // Re-open after closing last window (Cmd+W) should preserve
                 // recent position without adding cold-start file I/O.
@@ -3074,6 +3164,16 @@ mod tests {
         );
 
         assert_eq!(mask, NSWindowStyleMask::NSBorderlessWindowMask);
+    }
+
+    #[test]
+    fn explicit_initial_position_stays_in_backing_pixels() {
+        let (width, height, pos) =
+            resolve_initial_window_geometry(1600, 1200, Some(900), Some(700), 2);
+
+        assert_eq!(width, 800);
+        assert_eq!(height, 600);
+        assert_eq!(pos, Some(ScreenPoint::new(900, 700)));
     }
 }
 

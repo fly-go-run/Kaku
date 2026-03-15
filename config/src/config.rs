@@ -506,6 +506,9 @@ pub struct Config {
     pub mouse_drag_reorders_tabs: bool,
 
     #[dynamic(default = "default_true")]
+    pub mouse_drag_detaches_tabs: bool,
+
+    #[dynamic(default = "default_true")]
     pub mouse_wheel_scrolls_tabs: bool,
 
     /// If true, tab bar titles are prefixed with the tab index

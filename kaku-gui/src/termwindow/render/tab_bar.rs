@@ -1,7 +1,7 @@
 use crate::quad::TripleLayerQuadAllocator;
 use crate::tabbar::TabBarItem;
 use crate::termwindow::render::{forces_opaque_kaku_tui_window_background, RenderScreenLineParams};
-use crate::termwindow::{TabDragRenderInfo, UIItemType};
+use crate::termwindow::{TabDragRenderInfo, TabDragVisualMode, UIItemType};
 use crate::utilsprites::RenderMetrics;
 use config::ConfigHandle;
 use mux::renderable::RenderableDimensions;
@@ -78,7 +78,7 @@ impl crate::TermWindow {
                 });
 
                 // Paint the overlay for the dragged tab.
-                self.paint_fancy_tab_drag_overlay(info, tab_bar_y, tab_bar_height)?;
+                self.paint_fancy_tab_drag_overlay(info)?;
             }
             self.ui_items.append(&mut fancy_ui_items);
             return Ok(());
@@ -127,7 +127,10 @@ impl crate::TermWindow {
                         continue;
                     }
 
-                    if tab_slot == info.target_slot_idx {
+                    if matches!(
+                        info.mode,
+                        TabDragVisualMode::Reorder { target_slot_idx } if tab_slot == target_slot_idx
+                    ) {
                         current_left += info.overlay_width_px as usize;
                     }
 
@@ -309,7 +312,12 @@ impl crate::TermWindow {
         self.filled_rectangle(
             layers,
             1,
-            euclid::rect(strip_left, tab_bar_y, strip_right - strip_left, tab_bar_height),
+            euclid::rect(
+                strip_left,
+                tab_bar_y,
+                strip_right - strip_left,
+                tab_bar_height,
+            ),
             erase_bg,
         )?;
 
@@ -323,7 +331,10 @@ impl crate::TermWindow {
                 continue;
             }
 
-            if tab_slot == info.target_slot_idx {
+            if matches!(
+                info.mode,
+                TabDragVisualMode::Reorder { target_slot_idx } if tab_slot == target_slot_idx
+            ) {
                 current_left += info.overlay_width_px;
             }
 
@@ -379,7 +390,7 @@ impl crate::TermWindow {
         // Render the dragged tab title at the overlay position last so it stays on top.
         self.render_screen_line(
             RenderScreenLineParams {
-                top_pixel_y: tab_bar_y,
+                top_pixel_y: info.overlay_top_px,
                 left_pixel_x: info.overlay_left_px,
                 pixel_width: info.overlay_width_px,
                 stable_line_idx: None,
@@ -394,7 +405,7 @@ impl crate::TermWindow {
                     scrollback_top: 0,
                     viewport_rows: 1,
                     dpi: self.terminal_size.dpi,
-                    pixel_height: self.render_metrics.cell_size.height as usize,
+                    pixel_height: info.overlay_height_px as usize,
                     pixel_width: info.overlay_width_px as usize,
                     reverse_video: false,
                 },

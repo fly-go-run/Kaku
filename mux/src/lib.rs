@@ -644,6 +644,33 @@ pub struct MuxWindowBuilder {
 }
 
 impl MuxWindowBuilder {
+    pub fn cancel(&mut self) {
+        self.notified = true;
+        self.activity.take();
+    }
+
+    pub fn notify_and_take_activity(&mut self) -> Option<Activity> {
+        if self.notified {
+            return self.activity.take();
+        }
+
+        self.notified = true;
+        let window_id = self.window_id;
+        let mux = Mux::get();
+        if mux.is_main_thread() {
+            mux.notify(MuxNotification::WindowCreated(window_id));
+        } else {
+            promise::spawn::spawn_into_main_thread(async move {
+                if let Some(mux) = Mux::try_get() {
+                    mux.notify(MuxNotification::WindowCreated(window_id));
+                }
+            })
+            .detach();
+        }
+
+        self.activity.take()
+    }
+
     fn notify(&mut self) {
         if self.notified {
             return;
@@ -683,6 +710,12 @@ impl std::ops::Deref for MuxWindowBuilder {
     fn deref(&self) -> &WindowId {
         &self.window_id
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MoveTabBetweenWindowsResult {
+    pub source_window_id: WindowId,
+    pub source_slot_idx: usize,
 }
 
 impl Mux {
@@ -1310,6 +1343,70 @@ impl Mux {
         Ok(())
     }
 
+    pub fn move_tab_to_window(
+        &self,
+        tab_id: TabId,
+        target_window_id: WindowId,
+        target_slot_idx: usize,
+    ) -> anyhow::Result<MoveTabBetweenWindowsResult> {
+        let mut windows = self.windows.write();
+
+        let source_window_id = windows
+            .iter()
+            .find_map(|(window_id, window)| window.idx_by_id(tab_id).map(|_| *window_id))
+            .ok_or_else(|| anyhow!("move_tab_to_window: tab {tab_id:?} not found"))?;
+
+        anyhow::ensure!(
+            source_window_id != target_window_id,
+            "move_tab_to_window: source and target windows are both {target_window_id}"
+        );
+
+        let source_window_ptr: *mut Window =
+            windows.get_mut(&source_window_id).ok_or_else(|| {
+                anyhow!(
+                    "move_tab_to_window: source window {} not found",
+                    source_window_id
+                )
+            })?;
+        let target_window_ptr: *mut Window =
+            windows.get_mut(&target_window_id).ok_or_else(|| {
+                anyhow!(
+                    "move_tab_to_window: target window {} not found",
+                    target_window_id
+                )
+            })?;
+
+        // The earlier `source_window_id != target_window_id` guard guarantees these
+        // pointers refer to distinct windows, so borrowing them mutably together is sound.
+        let source_window = unsafe { &mut *source_window_ptr };
+        let target_window = unsafe { &mut *target_window_ptr };
+
+        let source_slot_idx = source_window.idx_by_id(tab_id).ok_or_else(|| {
+            anyhow!(
+                "move_tab_to_window: tab {tab_id:?} disappeared from source window {}",
+                source_window_id
+            )
+        })?;
+        let insert_idx = target_slot_idx.min(target_window.len());
+
+        let tab = source_window.remove_by_idx(source_slot_idx);
+        target_window.insert(insert_idx, &tab);
+        target_window.save_and_then_set_active(insert_idx);
+
+        drop(windows);
+
+        self.recompute_pane_count();
+        self.notify(MuxNotification::TabAddedToWindow {
+            tab_id,
+            window_id: target_window_id,
+        });
+
+        Ok(MoveTabBetweenWindowsResult {
+            source_window_id,
+            source_slot_idx,
+        })
+    }
+
     pub fn window_containing_tab(&self, tab_id: TabId) -> Option<WindowId> {
         for w in self.windows.read().values() {
             for t in w.iter() {
@@ -1795,5 +1892,176 @@ impl wezterm_term::DownloadHandler for MuxDownloader {
                 data: Arc::new(data),
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Mux, WindowId};
+    use crate::activity::Activity;
+    use crate::tab::{Tab, TabId};
+    use crate::window::Window;
+    use promise::spawn::SimpleExecutor;
+    use std::sync::{Arc, Mutex, MutexGuard};
+    use wezterm_term::TerminalSize;
+
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    struct TestMuxGuard {
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    impl Drop for TestMuxGuard {
+        fn drop(&mut self) {
+            Mux::shutdown();
+        }
+    }
+
+    fn setup_mux() -> (TestMuxGuard, Arc<Mux>) {
+        let lock = TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Mux::shutdown();
+        let mux = Arc::new(Mux::new(None));
+        Mux::set_mux(&mux);
+        (TestMuxGuard { _lock: lock }, mux)
+    }
+
+    fn test_size() -> TerminalSize {
+        TerminalSize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 800,
+            pixel_height: 600,
+            dpi: 96,
+        }
+    }
+
+    fn new_window(mux: &Arc<Mux>) -> WindowId {
+        let window = Window::new(Some("default".to_string()), None);
+        let window_id = window.window_id();
+        mux.windows.write().insert(window_id, window);
+        window_id
+    }
+
+    fn add_tab(mux: &Arc<Mux>, window_id: WindowId) -> Arc<Tab> {
+        let tab = Arc::new(Tab::new(&test_size()));
+        mux.add_tab_no_panes(&tab);
+        mux.add_tab_to_window(&tab, window_id).unwrap();
+        tab
+    }
+
+    fn tab_ids(mux: &Arc<Mux>, window_id: WindowId) -> Vec<TabId> {
+        mux.get_window(window_id)
+            .unwrap()
+            .iter()
+            .map(|tab| tab.tab_id())
+            .collect()
+    }
+
+    #[test]
+    fn move_tab_to_window_preserves_source_slot_for_rollback() {
+        let (_guard, mux) = setup_mux();
+        let source_window_id = new_window(&mux);
+        let target_window_id = new_window(&mux);
+
+        let tab_a = add_tab(&mux, source_window_id);
+        let tab_b = add_tab(&mux, source_window_id);
+        let tab_c = add_tab(&mux, source_window_id);
+        let tab_x = add_tab(&mux, target_window_id);
+
+        let result = mux
+            .move_tab_to_window(tab_b.tab_id(), target_window_id, 1)
+            .unwrap();
+
+        assert_eq!(result.source_window_id, source_window_id);
+        assert_eq!(result.source_slot_idx, 1);
+        assert_eq!(
+            tab_ids(&mux, source_window_id),
+            vec![tab_a.tab_id(), tab_c.tab_id()]
+        );
+        assert_eq!(
+            tab_ids(&mux, target_window_id),
+            vec![tab_x.tab_id(), tab_b.tab_id()]
+        );
+        assert_eq!(
+            mux.get_window(target_window_id).unwrap().get_active_idx(),
+            1
+        );
+    }
+
+    #[test]
+    fn move_tab_to_window_can_be_rolled_back() {
+        let (_guard, mux) = setup_mux();
+        let source_window_id = new_window(&mux);
+        let target_window_id = new_window(&mux);
+
+        let tab_a = add_tab(&mux, source_window_id);
+        let tab_b = add_tab(&mux, source_window_id);
+        let tab_c = add_tab(&mux, source_window_id);
+        let tab_x = add_tab(&mux, target_window_id);
+
+        let result = mux
+            .move_tab_to_window(tab_b.tab_id(), target_window_id, 1)
+            .unwrap();
+        mux.move_tab_to_window(
+            tab_b.tab_id(),
+            result.source_window_id,
+            result.source_slot_idx,
+        )
+        .unwrap();
+
+        assert_eq!(
+            tab_ids(&mux, source_window_id),
+            vec![tab_a.tab_id(), tab_b.tab_id(), tab_c.tab_id()]
+        );
+        assert_eq!(tab_ids(&mux, target_window_id), vec![tab_x.tab_id()]);
+    }
+
+    #[test]
+    fn move_tab_to_window_leaves_empty_source_window_alive_until_pruned() {
+        let (_guard, mux) = setup_mux();
+        let source_window_id = new_window(&mux);
+        let target_window_id = new_window(&mux);
+
+        let tab = add_tab(&mux, source_window_id);
+
+        mux.move_tab_to_window(tab.tab_id(), target_window_id, 0)
+            .unwrap();
+
+        assert!(mux.get_window(source_window_id).is_some());
+        assert!(mux.get_window(source_window_id).unwrap().is_empty());
+        assert_eq!(tab_ids(&mux, target_window_id), vec![tab.tab_id()]);
+    }
+
+    #[test]
+    fn held_window_builder_activity_keeps_empty_source_window_alive() {
+        let (_guard, mux) = setup_mux();
+        let executor = SimpleExecutor::new();
+        let source_window_id = new_window(&mux);
+        let tab = add_tab(&mux, source_window_id);
+
+        let mut builder = mux.new_empty_window(Some("default".to_string()), None);
+        let target_window_id = *builder;
+
+        mux.move_tab_to_window(tab.tab_id(), target_window_id, 0)
+            .unwrap();
+
+        let activity = builder
+            .notify_and_take_activity()
+            .expect("builder activity should be available");
+        drop(builder);
+
+        assert_eq!(Activity::count(), 1);
+        mux.prune_dead_windows();
+        assert!(mux.get_window(source_window_id).is_some());
+        assert!(mux.get_window(source_window_id).unwrap().is_empty());
+
+        drop(activity);
+        assert_eq!(Activity::count(), 0);
+        executor
+            .tick()
+            .expect("activity drop should schedule a prune");
+        assert!(mux.get_window(source_window_id).is_none());
     }
 }

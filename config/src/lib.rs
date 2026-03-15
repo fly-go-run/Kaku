@@ -769,6 +769,7 @@ end
 -- 5) Copy on select
 -- config.copy_on_select = false
 -- config.mouse_drag_reorders_tabs = false
+-- config.mouse_drag_detaches_tabs = true
 --
 -- 6) Default shell/program
 -- config.default_prog = { '/bin/zsh', '-l' }

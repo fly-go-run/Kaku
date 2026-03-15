@@ -374,6 +374,15 @@ impl App {
             },
             ConfigField {
                 section: "Behavior",
+                key: "Tab Drag Detach",
+                lua_key: "mouse_drag_detaches_tabs",
+                value: String::new(),
+                default: "Off".into(),
+                options: vec!["On", "Off"],
+                skip_write: false,
+            },
+            ConfigField {
+                section: "Behavior",
                 key: "Confirm Tab Close",
                 lua_key: "tab_close_confirmation",
                 value: String::new(),
@@ -672,6 +681,7 @@ impl App {
             }
             "copy_on_select"
             | "mouse_drag_reorders_tabs"
+            | "mouse_drag_detaches_tabs"
             | "enable_scroll_bar"
             | "tab_close_confirmation"
             | "pane_close_confirmation"
@@ -1178,6 +1188,7 @@ impl App {
             | "split_pane_gap" => field.value.clone(),
             "copy_on_select"
             | "mouse_drag_reorders_tabs"
+            | "mouse_drag_detaches_tabs"
             | "enable_scroll_bar"
             | "tab_close_confirmation"
             | "pane_close_confirmation"

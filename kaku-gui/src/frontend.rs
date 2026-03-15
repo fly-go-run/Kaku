@@ -6,12 +6,14 @@ use ::window::*;
 use anyhow::{Context, Error};
 use config::keyassignment::{KeyAssignment, SpawnCommand, SpawnTabDomain};
 use config::{ConfigSubscription, NotificationHandling};
+use mux::activity::Activity;
 use mux::client::ClientId;
+use mux::tab::TabId;
 use mux::window::WindowId as MuxWindowId;
 use mux::{Mux, MuxNotification};
 use promise::{Future, Promise};
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -20,11 +22,21 @@ use wezterm_toast_notification::*;
 
 pub const SET_DEFAULT_TERMINAL_EVENT: &str = "set-default-terminal";
 
+struct PendingDetachedTab {
+    // Hold the new-window activity open until the GUI creation result is known,
+    // so the empty source window cannot be pruned before finalize/rollback.
+    _activity: Activity,
+    tab_id: TabId,
+    source_window_id: MuxWindowId,
+    source_slot_idx: usize,
+}
+
 pub struct GuiFrontEnd {
     connection: Rc<Connection>,
     switching_workspaces: RefCell<bool>,
     spawned_mux_window: RefCell<HashSet<MuxWindowId>>,
     known_windows: RefCell<BTreeMap<Window, MuxWindowId>>,
+    pending_detached_tabs: RefCell<HashMap<MuxWindowId, PendingDetachedTab>>,
     client_id: Arc<ClientId>,
     config_subscription: RefCell<Option<ConfigSubscription>>,
     /// Global count of unread bell events across all windows
@@ -269,6 +281,7 @@ impl GuiFrontEnd {
             switching_workspaces: RefCell::new(false),
             spawned_mux_window: RefCell::new(HashSet::new()),
             known_windows: RefCell::new(BTreeMap::new()),
+            pending_detached_tabs: RefCell::new(HashMap::new()),
             client_id: client_id.clone(),
             config_subscription: RefCell::new(None),
             unread_bell_count: RefCell::new(0),
@@ -793,12 +806,14 @@ impl GuiFrontEnd {
                             "OpenGL initialization failed. This often means no compatible GPU renderer is available (for example in some VMs). Try setting `front_end = 'WebGpu'` in kaku.lua or enabling VM GPU acceleration."
                         );
                     }
-                    let mux = Mux::get();
-                    mux.kill_window(mux_window_id);
-                    front_end()
-                        .spawned_mux_window
-                        .borrow_mut()
-                        .remove(&mux_window_id);
+                    let fe = front_end();
+                    if !fe.rollback_pending_detached_tab(mux_window_id) {
+                        let mux = Mux::get();
+                        mux.kill_window(mux_window_id);
+                    }
+                    fe.spawned_mux_window.borrow_mut().remove(&mux_window_id);
+                } else {
+                    front_end().finalize_pending_detached_tab(mux_window_id);
                 }
             }
             *front_end().switching_workspaces.borrow_mut() = false;
@@ -838,6 +853,70 @@ impl GuiFrontEnd {
         if !self.is_switching_workspace() {
             self.reconcile_workspace();
         }
+    }
+
+    pub fn register_pending_detached_tab(
+        &self,
+        target_window_id: MuxWindowId,
+        activity: Activity,
+        tab_id: TabId,
+        source_window_id: MuxWindowId,
+        source_slot_idx: usize,
+    ) {
+        self.pending_detached_tabs.borrow_mut().insert(
+            target_window_id,
+            PendingDetachedTab {
+                _activity: activity,
+                tab_id,
+                source_window_id,
+                source_slot_idx,
+            },
+        );
+    }
+
+    fn finalize_pending_detached_tab(&self, target_window_id: MuxWindowId) {
+        if let Some(pending) = self
+            .pending_detached_tabs
+            .borrow_mut()
+            .remove(&target_window_id)
+        {
+            drop(pending);
+            Mux::get().prune_dead_windows();
+        }
+    }
+
+    fn rollback_pending_detached_tab(&self, target_window_id: MuxWindowId) -> bool {
+        let Some(pending) = self
+            .pending_detached_tabs
+            .borrow_mut()
+            .remove(&target_window_id)
+        else {
+            return false;
+        };
+
+        let mux = Mux::get();
+        match mux.move_tab_to_window(
+            pending.tab_id,
+            pending.source_window_id,
+            pending.source_slot_idx,
+        ) {
+            Ok(_) => {
+                mux.kill_window(target_window_id);
+                drop(pending);
+                mux.prune_dead_windows();
+            }
+            Err(err) => {
+                log::error!(
+                    "Failed to roll back detached tab {:?} from window {} to window {} slot {}: {err:#}",
+                    pending.tab_id,
+                    target_window_id,
+                    pending.source_window_id,
+                    pending.source_slot_idx,
+                );
+            }
+        }
+
+        true
     }
 
     fn update_unread_bell_badge(&self, current: usize) {

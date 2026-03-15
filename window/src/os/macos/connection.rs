@@ -10,6 +10,7 @@ use crate::os::macos::app::{
 use crate::screen::{ScreenInfo, Screens};
 use crate::spawn::*;
 use crate::Appearance;
+use crate::ScreenPoint;
 use cocoa::appkit::{NSApp, NSApplication, NSApplicationActivationPolicyRegular, NSScreen};
 use cocoa::base::{id, nil};
 use cocoa::foundation::{NSArray, NSInteger};
@@ -316,6 +317,71 @@ impl ConnectionOps for Connection {
             main,
             virtual_rect,
         })
+    }
+
+    fn clamp_top_left_to_visible_screen(&self, point: ScreenPoint) -> ScreenPoint {
+        unsafe {
+            let screens = NSScreen::screens(nil);
+            if screens.is_null() || screens.count() == 0 {
+                return point;
+            }
+
+            let primary = screens.objectAtIndex(0);
+            let primary_frame = NSScreen::frame(primary);
+            let primary_backing = NSScreen::convertRectToBacking_(primary, primary_frame);
+            let scale = primary_backing.size.height / primary_frame.size.height;
+
+            let point_cartesian = cocoa::foundation::NSPoint::new(
+                point.x as f64 / scale,
+                primary_frame.size.height - (point.y as f64 / scale),
+            );
+
+            let mut chosen_visible = None;
+            let mut best_distance_sq = f64::INFINITY;
+
+            for idx in 0..screens.count() {
+                let screen = screens.objectAtIndex(idx);
+                let visible: cocoa::foundation::NSRect = msg_send![screen, visibleFrame];
+                let dx = if point_cartesian.x < visible.origin.x {
+                    visible.origin.x - point_cartesian.x
+                } else if point_cartesian.x > visible.origin.x + visible.size.width {
+                    point_cartesian.x - (visible.origin.x + visible.size.width)
+                } else {
+                    0.0
+                };
+                let dy = if point_cartesian.y < visible.origin.y {
+                    visible.origin.y - point_cartesian.y
+                } else if point_cartesian.y > visible.origin.y + visible.size.height {
+                    point_cartesian.y - (visible.origin.y + visible.size.height)
+                } else {
+                    0.0
+                };
+                let distance_sq = dx * dx + dy * dy;
+                if distance_sq < best_distance_sq {
+                    best_distance_sq = distance_sq;
+                    chosen_visible = Some(visible);
+                }
+                if distance_sq == 0.0 {
+                    break;
+                }
+            }
+
+            let Some(visible) = chosen_visible else {
+                return point;
+            };
+
+            let clamped_cartesian_x = point_cartesian
+                .x
+                .clamp(visible.origin.x, visible.origin.x + visible.size.width);
+            let clamped_cartesian_y = point_cartesian
+                .y
+                .clamp(visible.origin.y, visible.origin.y + visible.size.height);
+
+            ScreenPoint::new(
+                (clamped_cartesian_x * scale) as isize,
+                ((primary_frame.size.height - clamped_cartesian_y) * scale) as isize,
+            )
+        }
     }
 }
 

@@ -91,6 +91,51 @@ pub(crate) fn compute_target_slot(
     non_dragged_midpoints.len()
 }
 
+pub(crate) fn distance_outside_strip(y: isize, strip_top: isize, strip_bottom: isize) -> isize {
+    if y < strip_top {
+        strip_top - y
+    } else if y > strip_bottom {
+        y - strip_bottom
+    } else {
+        0
+    }
+}
+
+pub(crate) fn pointer_outside_window(
+    x: isize,
+    y: isize,
+    window_width: usize,
+    window_height: usize,
+) -> bool {
+    x < 0 || y < 0 || x >= window_width as isize || y >= window_height as isize
+}
+
+fn resolve_tab_drag_intent(
+    detach_enabled: bool,
+    pointer_x: isize,
+    pointer_y: isize,
+    window_width: usize,
+    window_height: usize,
+    strip_top: isize,
+    strip_bottom: isize,
+    detach_threshold: isize,
+    target_slot_idx: usize,
+) -> super::TabDragIntent {
+    if !detach_enabled {
+        return super::TabDragIntent::Reorder { target_slot_idx };
+    }
+
+    if pointer_outside_window(pointer_x, pointer_y, window_width, window_height) {
+        return super::TabDragIntent::DetachPending;
+    }
+
+    if distance_outside_strip(pointer_y, strip_top, strip_bottom) >= detach_threshold {
+        super::TabDragIntent::DetachPending
+    } else {
+        super::TabDragIntent::Reorder { target_slot_idx }
+    }
+}
+
 impl super::TermWindow {
     const TAB_DRAG_THRESHOLD: isize = 6;
 
@@ -109,9 +154,12 @@ impl super::TermWindow {
             start_event,
             start_bounds,
             source_slot_idx: tab_idx,
-            target_slot_idx: tab_idx,
             has_dragged: false,
             overlay_offset_x: 0,
+            overlay_offset_y: 0,
+            intent: super::TabDragIntent::Reorder {
+                target_slot_idx: tab_idx,
+            },
         });
     }
 
@@ -205,6 +253,7 @@ impl super::TermWindow {
         }
         state.has_dragged = true;
         state.overlay_offset_x = event.coords.x - state.start_event.coords.x;
+        state.overlay_offset_y = event.coords.y - state.start_event.coords.y;
 
         // Resolve the dragged tab's current mux index from its stable TabId.
         let mux = Mux::get();
@@ -230,17 +279,65 @@ impl super::TermWindow {
             + state.start_bounds.width as isize / 2;
 
         let new_target = self.compute_target_slot_idx(dragged_tab_idx, overlay_center_x);
-        let old_target = state.target_slot_idx;
-        state.target_slot_idx = new_target;
+        let new_intent = match self.tab_drag_strip_bounds() {
+            Some((strip_top, strip_bottom)) => resolve_tab_drag_intent(
+                self.config.mouse_drag_detaches_tabs,
+                event.coords.x,
+                event.coords.y,
+                self.dimensions.pixel_width,
+                self.dimensions.pixel_height,
+                strip_top,
+                strip_bottom,
+                self.tab_drag_detach_threshold_px(),
+                new_target,
+            ),
+            None => super::TabDragIntent::Reorder {
+                target_slot_idx: new_target,
+            },
+        };
 
-        if new_target != old_target {
+        if new_intent != state.intent {
             // The base strip layout changed — fancy tab bar cache must be rebuilt.
             self.invalidate_fancy_tab_bar();
         }
+        state.intent = new_intent;
 
         self.tab_drag_state = Some(state);
         context.invalidate();
         true
+    }
+
+    fn tab_drag_intent_for_event(
+        &self,
+        tab_id: TabId,
+        start_event: &MouseEvent,
+        start_bounds: &UIItem,
+        event: &MouseEvent,
+    ) -> Option<super::TabDragIntent> {
+        let mux = Mux::get();
+        let dragged_tab_idx = mux
+            .get_window(self.mux_window_id)
+            .and_then(|w| w.idx_by_id(tab_id))?;
+
+        let overlay_offset_x = event.coords.x - start_event.coords.x;
+        let overlay_center_x =
+            start_bounds.x as isize + overlay_offset_x + start_bounds.width as isize / 2;
+        let target_slot_idx = self.compute_target_slot_idx(dragged_tab_idx, overlay_center_x);
+
+        Some(match self.tab_drag_strip_bounds() {
+            Some((strip_top, strip_bottom)) => resolve_tab_drag_intent(
+                self.config.mouse_drag_detaches_tabs,
+                event.coords.x,
+                event.coords.y,
+                self.dimensions.pixel_width,
+                self.dimensions.pixel_height,
+                strip_top,
+                strip_bottom,
+                self.tab_drag_detach_threshold_px(),
+                target_slot_idx,
+            ),
+            None => super::TabDragIntent::Reorder { target_slot_idx },
+        })
     }
 
     fn resolve_ui_item(&self, event: &MouseEvent) -> Option<UIItem> {
@@ -431,13 +528,29 @@ impl super::TermWindow {
                 if press == &MousePress::Left {
                     if let Some(state) = self.tab_drag_state.take() {
                         if state.has_dragged {
-                            if let Err(err) = self
-                                .move_specific_tab_to_slot(state.tab_id, state.target_slot_idx)
-                            {
-                                log::debug!(
-                                    "move_specific_tab_to_slot({:?}, {}) failed: {err:#}",
+                            let commit_intent = self
+                                .tab_drag_intent_for_event(
                                     state.tab_id,
-                                    state.target_slot_idx,
+                                    &state.start_event,
+                                    &state.start_bounds,
+                                    &event,
+                                )
+                                .unwrap_or(state.intent);
+                            let result = match commit_intent {
+                                super::TabDragIntent::Reorder { target_slot_idx } => {
+                                    self.move_specific_tab_to_slot(state.tab_id, target_slot_idx)
+                                }
+                                super::TabDragIntent::DetachPending => self
+                                    .detach_tab_to_new_window(
+                                        state.tab_id,
+                                        &state.start_event,
+                                        event.screen_coords,
+                                    ),
+                            };
+                            if let Err(err) = result {
+                                log::debug!(
+                                    "tab drag commit for {:?} failed: {err:#}",
+                                    state.tab_id,
                                 );
                             }
                             self.invalidate_fancy_tab_bar();
@@ -1717,7 +1830,11 @@ mod tests {
 
     // ── compute_target_slot tests ──
 
-    use super::compute_target_slot;
+    use super::{
+        compute_target_slot, distance_outside_strip, pointer_outside_window,
+        resolve_tab_drag_intent,
+    };
+    use crate::termwindow::TabDragIntent;
 
     /// Helper: create midpoints for tabs of equal width at regular intervals.
     /// Returns midpoints for all tabs except `skip_idx`.
@@ -1789,5 +1906,48 @@ mod tests {
         // 520 > 450, 520 < 550 → slot 4.
         let mids = equal_tabs(6, 100, 0);
         assert_eq!(compute_target_slot(&mids, 520), 4);
+    }
+
+    #[test]
+    fn distance_outside_strip_is_zero_inside_bounds() {
+        assert_eq!(distance_outside_strip(20, 10, 30), 0);
+        assert_eq!(distance_outside_strip(10, 10, 30), 0);
+        assert_eq!(distance_outside_strip(30, 10, 30), 0);
+    }
+
+    #[test]
+    fn distance_outside_strip_measures_nearest_edge() {
+        assert_eq!(distance_outside_strip(6, 10, 30), 4);
+        assert_eq!(distance_outside_strip(37, 10, 30), 7);
+    }
+
+    #[test]
+    fn drag_intent_switches_to_detach_when_far_enough_away() {
+        let intent = resolve_tab_drag_intent(true, 20, 44, 80, 60, 10, 30, 10, 2);
+        assert_eq!(intent, TabDragIntent::DetachPending);
+    }
+
+    #[test]
+    fn drag_intent_stays_reorder_when_detach_disabled_or_reentered() {
+        let disabled = resolve_tab_drag_intent(false, 20, 44, 80, 60, 10, 30, 10, 2);
+        let reentered = resolve_tab_drag_intent(true, 20, 18, 80, 60, 10, 30, 10, 1);
+
+        assert_eq!(disabled, TabDragIntent::Reorder { target_slot_idx: 2 });
+        assert_eq!(reentered, TabDragIntent::Reorder { target_slot_idx: 1 });
+    }
+
+    #[test]
+    fn pointer_outside_window_detects_all_edges() {
+        assert!(pointer_outside_window(-1, 10, 80, 60));
+        assert!(pointer_outside_window(10, -1, 80, 60));
+        assert!(pointer_outside_window(80, 10, 80, 60));
+        assert!(pointer_outside_window(10, 60, 80, 60));
+        assert!(!pointer_outside_window(79, 59, 80, 60));
+    }
+
+    #[test]
+    fn drag_intent_switches_to_detach_when_pointer_leaves_window() {
+        let intent = resolve_tab_drag_intent(true, 81, 18, 80, 60, 10, 30, 10, 2);
+        assert_eq!(intent, TabDragIntent::DetachPending);
     }
 }

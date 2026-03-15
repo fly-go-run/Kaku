@@ -512,12 +512,22 @@ pub struct TabDragRenderInfo {
     pub dragged_tab_idx: usize,
     /// The visual slot the tab was originally in.
     pub source_slot_idx: usize,
-    /// The visual slot where the spacer should appear.
-    pub target_slot_idx: usize,
+    /// Whether the base strip should show a reorder spacer or collapse entirely.
+    pub mode: TabDragVisualMode,
     /// Horizontal position of the overlay in pixels.
     pub overlay_left_px: f32,
+    /// Vertical position of the overlay in pixels.
+    pub overlay_top_px: f32,
     /// Width of the overlay in pixels.
     pub overlay_width_px: f32,
+    /// Height of the overlay in pixels.
+    pub overlay_height_px: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TabDragVisualMode {
+    Reorder { target_slot_idx: usize },
+    Detach,
 }
 
 #[derive(Clone, Default)]
@@ -713,6 +723,12 @@ struct SplitDragState {
 ///
 /// Identity is based on `TabId` so the drag remains stable even if
 /// tab indices shift due to unrelated events (e.g. a tab closing).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TabDragIntent {
+    Reorder { target_slot_idx: usize },
+    DetachPending,
+}
+
 struct TabDragState {
     tab_id: TabId,
     start_event: MouseEvent,
@@ -720,12 +736,14 @@ struct TabDragState {
     start_bounds: UIItem,
     /// Visual slot index where the tab originally lived.
     source_slot_idx: usize,
-    /// Visual slot index where the tab would be inserted on release.
-    target_slot_idx: usize,
     /// Set to true once movement exceeds the drag threshold.
     has_dragged: bool,
     /// Horizontal pixel offset of the overlay relative to `start_bounds.x`.
     overlay_offset_x: isize,
+    /// Vertical pixel offset of the overlay relative to `start_bounds.y`.
+    overlay_offset_y: isize,
+    /// Current drag intent.
+    intent: TabDragIntent,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3320,6 +3338,96 @@ impl TermWindow {
         Ok(())
     }
 
+    fn tab_drag_strip_bounds(&self) -> Option<(isize, isize)> {
+        if !self.show_tab_bar {
+            return None;
+        }
+
+        let tab_bar_height = self.tab_bar_pixel_height().ok()?.ceil() as isize;
+        if tab_bar_height <= 0 {
+            return None;
+        }
+
+        let top = if self.config.tab_bar_at_bottom {
+            (self.dimensions.pixel_height as isize - tab_bar_height).max(0)
+        } else {
+            0
+        };
+        let bottom = top + tab_bar_height.saturating_sub(1);
+
+        Some((top, bottom))
+    }
+
+    fn tab_drag_detach_threshold_px(&self) -> isize {
+        let tab_bar_height = self
+            .tab_bar_pixel_height()
+            .map(|height| height.ceil() as isize)
+            .unwrap_or(self.render_metrics.cell_size.height as isize);
+        tab_bar_height.max(self.render_metrics.cell_size.height as isize)
+    }
+
+    fn tab_drag_detach_window_position(
+        start_event: &MouseEvent,
+        last_screen_coords: ScreenPoint,
+    ) -> GuiPosition {
+        let top_left = ScreenPoint::new(
+            last_screen_coords.x - start_event.coords.x,
+            last_screen_coords.y - start_event.coords.y,
+        );
+        let top_left = Connection::get()
+            .map(|conn| conn.clamp_top_left_to_visible_screen(top_left))
+            .unwrap_or(top_left);
+
+        GuiPosition {
+            x: Dimension::Pixels(top_left.x as f32),
+            y: Dimension::Pixels(top_left.y as f32),
+            origin: GeometryOrigin::ScreenCoordinateSystem,
+        }
+    }
+
+    fn detach_tab_to_new_window(
+        &mut self,
+        tab_id: TabId,
+        start_event: &MouseEvent,
+        last_screen_coords: ScreenPoint,
+    ) -> anyhow::Result<()> {
+        let frontend = try_front_end().ok_or_else(|| anyhow!("GUI frontend is unavailable"))?;
+        let mux = Mux::get();
+        let workspace = mux
+            .get_window(self.mux_window_id)
+            .map(|window| window.get_workspace().to_string())
+            .ok_or_else(|| anyhow!("source mux window {} no longer exists", self.mux_window_id))?;
+        let position = Self::tab_drag_detach_window_position(start_event, last_screen_coords);
+        let mut target_window_builder = mux.new_empty_window(Some(workspace), Some(position));
+        let target_window_id = *target_window_builder;
+
+        match mux.move_tab_to_window(tab_id, target_window_id, 0) {
+            Ok(result) => {
+                let activity = target_window_builder
+                    .notify_and_take_activity()
+                    .ok_or_else(|| anyhow!("new window activity was already consumed"))?;
+                frontend.register_pending_detached_tab(
+                    target_window_id,
+                    activity,
+                    tab_id,
+                    result.source_window_id,
+                    result.source_slot_idx,
+                );
+            }
+            Err(err) => {
+                target_window_builder.cancel();
+                mux.kill_window(target_window_id);
+                anyhow::bail!(
+                    "move_tab_to_window({tab_id:?}, {target_window_id}, 0) failed: {err:#}"
+                );
+            }
+        }
+
+        self.update_title();
+        self.update_scrollbar();
+        Ok(())
+    }
+
     /// Build a `TabDragRenderInfo` snapshot from the current `TabDragState`,
     /// resolving `TabId` to the live tab index. Returns `None` if there is
     /// no active drag or the tab no longer exists.
@@ -3334,12 +3442,21 @@ impl TermWindow {
         let dragged_tab_idx = window.idx_by_id(state.tab_id)?;
         drop(window);
 
+        let mode = match state.intent {
+            TabDragIntent::Reorder { target_slot_idx } => {
+                TabDragVisualMode::Reorder { target_slot_idx }
+            }
+            TabDragIntent::DetachPending => TabDragVisualMode::Detach,
+        };
+
         Some(TabDragRenderInfo {
             dragged_tab_idx,
             source_slot_idx: state.source_slot_idx,
-            target_slot_idx: state.target_slot_idx,
+            mode,
             overlay_left_px: (state.start_bounds.x as isize + state.overlay_offset_x) as f32,
+            overlay_top_px: (state.start_bounds.y as isize + state.overlay_offset_y) as f32,
             overlay_width_px: state.start_bounds.width as f32,
+            overlay_height_px: state.start_bounds.height as f32,
         })
     }
 
@@ -5388,7 +5505,9 @@ impl Drop for TermWindow {
 #[cfg(test)]
 mod tests {
     use super::{InputBroadcastMode, TermWindow};
+    use config::{Dimension, GeometryOrigin};
     use mux::tab::TabId;
+    use window::{Modifiers, MouseButtons, MouseEvent, MouseEventKind, Point, ScreenPoint};
 
     #[test]
     fn other_user_vars_never_trigger_reload() {
@@ -5438,5 +5557,23 @@ mod tests {
         assert!(!InputBroadcastMode::CurrentTab.applies_to_active_tab(None, Some(tab_a)));
         assert!(InputBroadcastMode::AllTabs.applies_to_active_tab(Some(tab_a), Some(tab_b)));
         assert!(!InputBroadcastMode::Off.applies_to_active_tab(Some(tab_a), Some(tab_a)));
+    }
+
+    #[test]
+    fn tab_drag_detach_window_position_reuses_press_anchor() {
+        let start_event = MouseEvent {
+            kind: MouseEventKind::Press(window::MousePress::Left),
+            coords: Point::new(48, 22),
+            screen_coords: ScreenPoint::new(1480, 860),
+            mouse_buttons: MouseButtons::LEFT,
+            modifiers: Modifiers::NONE,
+        };
+
+        let position =
+            TermWindow::tab_drag_detach_window_position(&start_event, ScreenPoint::new(1600, 920));
+
+        assert_eq!(position.x, Dimension::Pixels(1552.0));
+        assert_eq!(position.y, Dimension::Pixels(898.0));
+        assert_eq!(position.origin, GeometryOrigin::ScreenCoordinateSystem);
     }
 }

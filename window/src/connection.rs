@@ -1,5 +1,7 @@
 use crate::screen::Screens;
-use crate::{Appearance, Connection, GeometryOrigin, RequestedWindowGeometry, ResolvedGeometry};
+use crate::{
+    Appearance, Connection, GeometryOrigin, RequestedWindowGeometry, ResolvedGeometry, ScreenPoint,
+};
 use anyhow::Result as Fallible;
 use config::keyassignment::KeyAssignment;
 use config::DimensionContext;
@@ -137,6 +139,12 @@ pub trait ConnectionOps {
     /// Returns information about the screens
     fn screens(&self) -> anyhow::Result<Screens> {
         anyhow::bail!("Unable to query screen information");
+    }
+
+    /// Clamp a top-left screen coordinate into the nearest visible region.
+    /// Platforms without a notion of visible frame can leave it unchanged.
+    fn clamp_top_left_to_visible_screen(&self, point: ScreenPoint) -> ScreenPoint {
+        point
     }
 
     fn resolve_geometry(&self, geometry: RequestedWindowGeometry) -> ResolvedGeometry {
