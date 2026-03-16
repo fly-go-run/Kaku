@@ -177,37 +177,37 @@ impl crate::TermWindow {
                     .horizontal_align(HorizontalAlign::Center)
                     .item_type(UIItemType::TabBar(item.item.clone()))
                     .margin(BoxDimension {
-                        left: Dimension::Cells(0.1),
-                        right: Dimension::Cells(0.1),
-                        top: Dimension::Cells(0.25),
-                        bottom: Dimension::Cells(0.15),
+                        left: Dimension::Pixels(3.),
+                        right: Dimension::Pixels(3.),
+                        top: Dimension::Pixels(6.),
+                        bottom: Dimension::Pixels(6.),
                     })
                     .padding(BoxDimension {
                         left: tab_padding_h,
                         right: tab_padding_h,
-                        top: Dimension::Cells(0.15),
-                        bottom: Dimension::Cells(0.15),
+                        top: Dimension::Pixels(4.),
+                        bottom: Dimension::Pixels(4.),
                     })
                     .border(BoxDimension::new(Dimension::Pixels(1.)))
                     .border_corners(Some(Corners {
                         top_left: SizedPoly {
-                            width: Dimension::Cells(0.5),
-                            height: Dimension::Cells(0.5),
+                            width: Dimension::Pixels(8.),
+                            height: Dimension::Pixels(8.),
                             poly: TOP_LEFT_ROUNDED_CORNER,
                         },
                         top_right: SizedPoly {
-                            width: Dimension::Cells(0.5),
-                            height: Dimension::Cells(0.5),
+                            width: Dimension::Pixels(8.),
+                            height: Dimension::Pixels(8.),
                             poly: TOP_RIGHT_ROUNDED_CORNER,
                         },
                         bottom_left: SizedPoly {
-                            width: Dimension::Cells(0.5),
-                            height: Dimension::Cells(0.5),
+                            width: Dimension::Pixels(8.),
+                            height: Dimension::Pixels(8.),
                             poly: BOTTOM_LEFT_ROUNDED_CORNER,
                         },
                         bottom_right: SizedPoly {
-                            width: Dimension::Cells(0.5),
-                            height: Dimension::Cells(0.5),
+                            width: Dimension::Pixels(8.),
+                            height: Dimension::Pixels(8.),
                             poly: BOTTOM_RIGHT_ROUNDED_CORNER,
                         },
                     }))
@@ -224,37 +224,37 @@ impl crate::TermWindow {
                     .horizontal_align(HorizontalAlign::Center)
                     .item_type(UIItemType::TabBar(item.item.clone()))
                     .margin(BoxDimension {
-                        left: Dimension::Cells(0.1),
-                        right: Dimension::Cells(0.1),
-                        top: Dimension::Cells(0.25),
-                        bottom: Dimension::Cells(0.15),
+                        left: Dimension::Pixels(3.),
+                        right: Dimension::Pixels(3.),
+                        top: Dimension::Pixels(6.),
+                        bottom: Dimension::Pixels(6.),
                     })
                     .padding(BoxDimension {
                         left: tab_padding_h,
                         right: tab_padding_h,
-                        top: Dimension::Cells(0.15),
-                        bottom: Dimension::Cells(0.15),
+                        top: Dimension::Pixels(4.),
+                        bottom: Dimension::Pixels(4.),
                     })
                     .border(BoxDimension::new(Dimension::Pixels(1.)))
                     .border_corners(Some(Corners {
                         top_left: SizedPoly {
-                            width: Dimension::Cells(0.5),
-                            height: Dimension::Cells(0.5),
+                            width: Dimension::Pixels(8.),
+                            height: Dimension::Pixels(8.),
                             poly: TOP_LEFT_ROUNDED_CORNER,
                         },
                         top_right: SizedPoly {
-                            width: Dimension::Cells(0.5),
-                            height: Dimension::Cells(0.5),
+                            width: Dimension::Pixels(8.),
+                            height: Dimension::Pixels(8.),
                             poly: TOP_RIGHT_ROUNDED_CORNER,
                         },
                         bottom_left: SizedPoly {
-                            width: Dimension::Cells(0.5),
-                            height: Dimension::Cells(0.5),
+                            width: Dimension::Pixels(8.),
+                            height: Dimension::Pixels(8.),
                             poly: BOTTOM_LEFT_ROUNDED_CORNER,
                         },
                         bottom_right: SizedPoly {
-                            width: Dimension::Cells(0.5),
-                            height: Dimension::Cells(0.5),
+                            width: Dimension::Pixels(8.),
+                            height: Dimension::Pixels(8.),
                             poly: BOTTOM_RIGHT_ROUNDED_CORNER,
                         },
                     }))
@@ -264,7 +264,7 @@ impl crate::TermWindow {
                         text: fg_color
                             .unwrap_or_else(|| {
                                 let inactive_tab = colors.inactive_tab();
-                                inactive_tab.fg_color.into()
+                                inactive_tab.fg_color.lighten_fixed(0.15).into()
                             })
                             .to_linear()
                             .into(),
