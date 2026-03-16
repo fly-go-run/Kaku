@@ -440,13 +440,29 @@ impl crate::TermWindow {
         config: &ConfigHandle,
         fontconfig: &wezterm_font::FontConfiguration,
         render_metrics: &RenderMetrics,
+        is_fullscreen: bool,
+        num_tabs: usize,
     ) -> anyhow::Result<f32> {
         if config.use_fancy_tab_bar {
             let font = fontconfig.title_font()?;
             // Use ceiled cell_height to match RenderMetrics::with_font_metrics
             let cell_height = font.metrics().cell_height.get().ceil() as f32;
-            let title_row_height = (cell_height * 1.4).ceil().max(28.0);
-            let tab_strip_height = (cell_height * 2.0).ceil();
+
+            let hide_title_row = is_fullscreen && config.hide_title_bar_in_full_screen;
+            let title_row_height = if hide_title_row {
+                0.0
+            } else {
+                (cell_height * 1.4).ceil().max(28.0)
+            };
+
+            let hide_tabs_strip =
+                config.hide_tab_bar_if_only_one_tab && num_tabs <= 1 && !is_fullscreen;
+            let tab_strip_height = if hide_tabs_strip {
+                0.0
+            } else {
+                (cell_height * 2.0).ceil()
+            };
+
             Ok(title_row_height + tab_strip_height)
         } else {
             Ok(render_metrics.cell_size.height as f32)
@@ -454,6 +470,22 @@ impl crate::TermWindow {
     }
 
     pub fn tab_bar_pixel_height(&self) -> anyhow::Result<f32> {
-        Self::tab_bar_pixel_height_impl(&self.config, &self.fonts, &self.render_metrics)
+        let is_fullscreen = self.layout_is_effective_fullscreen();
+        let _num_tabs = self.tab_bar.items().len();
+        // The fancy tab bar has extra non-tab items (LeftStatus, WindowButtons, NewTabButton, etc.)
+        // But for "hide_tab_bar_if_only_one_tab", we only care about ACTUAL tabs.
+        let mut actual_tab_count = 0;
+        for item in self.tab_bar.items() {
+            if matches!(item.item, TabBarItem::Tab { .. }) {
+                actual_tab_count += 1;
+            }
+        }
+        Self::tab_bar_pixel_height_impl(
+            &self.config,
+            &self.fonts,
+            &self.render_metrics,
+            is_fullscreen,
+            actual_tab_count,
+        )
     }
 }

@@ -203,19 +203,20 @@ impl crate::TermWindow {
                     }
                     _ => {
                         self.scheduled_animation.borrow_mut().replace(next_due);
-                        let window = self.window.clone().take().unwrap();
-                        promise::spawn::spawn(async move {
-                            Timer::at(next_due).await;
-                            let win = window.clone();
-                            window.notify(TermWindowNotif::Apply(Box::new(move |tw| {
-                                tw.scheduled_animation.borrow_mut().take();
-                                // Modal content is cached, so blinking carets and other
-                                // time-based modal elements must be explicitly reconfigured.
-                                tw.invalidate_modal();
-                                win.invalidate();
-                            })));
-                        })
-                        .detach();
+                        if let Some(window) = self.window.clone() {
+                            promise::spawn::spawn(async move {
+                                Timer::at(next_due).await;
+                                let win = window.clone();
+                                window.notify(TermWindowNotif::Apply(Box::new(move |tw| {
+                                    tw.scheduled_animation.borrow_mut().take();
+                                    // Modal content is cached, so blinking carets and other
+                                    // time-based modal elements must be explicitly reconfigured.
+                                    tw.invalidate_modal();
+                                    win.invalidate();
+                                })));
+                            })
+                            .detach();
+                        }
                     }
                 }
             }

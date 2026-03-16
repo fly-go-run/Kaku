@@ -3192,7 +3192,7 @@ config.keys = {
       if #panes > 1 then
         win:perform_action(wezterm.action.CloseCurrentPane { confirm = config.pane_close_confirmation }, pane)
       else
-        local should_close_tab = (#tabs > 1) or (#wezterm.mux.all_windows() > 1)
+        local should_close_tab = (#tabs > 1) or (#wezterm.mux.all_windows() > 1) or win:get_dimensions().is_full_screen
         if should_close_tab then
           win:perform_action(wezterm.action.CloseCurrentTab { confirm = config.tab_close_confirmation }, pane)
           return

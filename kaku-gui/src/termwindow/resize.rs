@@ -975,7 +975,7 @@ fn effective_vertical_padding_with_policy(
     show_tab_bar: bool,
     tab_bar_at_bottom: bool,
     tab_bar_height: usize,
-    _is_fullscreen: bool,
+    is_fullscreen: bool,
     user_has_custom_padding: bool,
 ) -> (usize, usize) {
     let base_top = config.window_padding.top.evaluate_as_pixels(context) as usize;
@@ -984,9 +984,11 @@ fn effective_vertical_padding_with_policy(
         .top
         .evaluate_as_pixels(context) as usize;
 
+    let hide_title_row = is_fullscreen && config.hide_title_bar_in_full_screen;
+
     // Respect explicit user padding and only apply Kaku's visual heuristics
     // for the managed/default padding path.
-    let mut top = if user_has_custom_padding {
+    let mut top = if user_has_custom_padding || hide_title_row {
         base_top
     } else {
         effective_top_padding(base_top, default_top)
@@ -994,7 +996,7 @@ fn effective_vertical_padding_with_policy(
     let mut bottom = base_bottom;
 
     // Top-tab visible mode uses a slightly tighter top gap than hidden mode.
-    if !user_has_custom_padding && show_tab_bar && !tab_bar_at_bottom {
+    if !user_has_custom_padding && show_tab_bar && !tab_bar_at_bottom && !hide_title_row {
         top = top.saturating_sub(TOP_TAB_VISIBLE_TOP_TIGHTENING);
     }
 

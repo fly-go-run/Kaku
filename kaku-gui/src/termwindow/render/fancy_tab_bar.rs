@@ -290,7 +290,7 @@ impl crate::TermWindow {
         // Two-layer layout: title row + tab strip row
         let cell_height = metrics.cell_size.height as f32;
         let title_row_height = (cell_height * 1.4).ceil().max(28.0);
-        let tab_strip_height = (tab_bar_height - title_row_height).max(cell_height);
+        let mut tab_strip_height = (tab_bar_height - title_row_height).max(cell_height);
         let border = self.get_os_border();
         let is_fullscreen = self.layout_is_effective_fullscreen();
         // Tab strip padding in logical points (DPI-aware)
@@ -382,6 +382,13 @@ impl crate::TermWindow {
         let max_tab_width =
             ((available_for_tabs / actual_tab_count.max(1.0)) - per_tab_overhead).max(0.);
 
+        let is_fullscreen = self.layout_is_effective_fullscreen();
+        let hide_tabs_strip =
+            self.config.hide_tab_bar_if_only_one_tab && actual_tab_count <= 1.0 && !is_fullscreen;
+        if hide_tabs_strip {
+            tab_strip_height = 0.0;
+        }
+
         let drag_info = self.tab_drag_render_info();
         let mut tab_slot = 0usize;
 
@@ -400,6 +407,9 @@ impl crate::TermWindow {
                     }
                 }
                 TabBarItem::Tab { tab_idx, active } => {
+                    if hide_tabs_strip {
+                        continue;
+                    }
                     // During drag: skip the dragged tab entirely.
                     if drag_info
                         .as_ref()
@@ -442,7 +452,11 @@ impl crate::TermWindow {
                     strip_left_eles.push(elem);
                     tab_slot += 1;
                 }
-                _ => strip_left_eles.push(item_to_elem(item)),
+                _ => {
+                    if !hide_tabs_strip {
+                        strip_left_eles.push(item_to_elem(item))
+                    }
+                }
             }
         }
 
@@ -500,10 +514,23 @@ impl crate::TermWindow {
             );
         }
 
+        // In fullscreen, start from 0 since left_padding already handles alignment
+        let bounds_left = if is_fullscreen {
+            0.0
+        } else {
+            border.left.get() as f32
+        };
+        let bounds_width = if is_fullscreen {
+            self.dimensions.pixel_width as f32
+        } else {
+            self.dimensions.pixel_width as f32 - (border.left + border.right).get() as f32
+        };
+
         let title_row = Element::new(&font, ElementContent::Children(title_row_children))
             .display(DisplayType::Block)
             .item_type(UIItemType::TabBar(TabBarItem::None))
             .min_height(Some(Dimension::Pixels(title_row_height)))
+            .min_width(Some(Dimension::Pixels(bounds_width)))
             .colors(bar_colors.clone())
             .padding(BoxDimension {
                 left: title_left_padding,
@@ -532,8 +559,15 @@ impl crate::TermWindow {
                 bottom: Dimension::Cells(0.),
             });
 
-        // ── Assemble outer container with two rows ──
-        let children = vec![title_row, tab_strip_row];
+        // ── Assemble outer container with one or two rows ──
+        let hide_title_row = is_fullscreen && self.config.hide_title_bar_in_full_screen;
+        let mut children = vec![];
+        if !hide_title_row {
+            children.push(title_row);
+        }
+        if !hide_tabs_strip {
+            children.push(tab_strip_row);
+        }
         let content = ElementContent::Children(children);
 
         let tabs = Element::new(&font, content)
@@ -543,18 +577,6 @@ impl crate::TermWindow {
             .min_height(Some(Dimension::Pixels(tab_bar_height)))
             .vertical_align(VerticalAlign::Bottom)
             .colors(bar_colors);
-
-        // In fullscreen, start from 0 since left_padding already handles alignment
-        let bounds_left = if is_fullscreen {
-            0.0
-        } else {
-            border.left.get() as f32
-        };
-        let bounds_width = if is_fullscreen {
-            self.dimensions.pixel_width as f32
-        } else {
-            self.dimensions.pixel_width as f32 - (border.left + border.right).get() as f32
-        };
 
         let mut computed = self.compute_element(
             &LayoutContext {

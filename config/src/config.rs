@@ -538,6 +538,10 @@ pub struct Config {
     #[dynamic(default)]
     pub hide_tab_bar_if_only_one_tab: bool,
 
+    /// If true, hide the title row (left/right status) when in full screen mode.
+    #[dynamic(default = "default_true")]
+    pub hide_title_bar_in_full_screen: bool,
+
     #[dynamic(default)]
     pub enable_scroll_bar: bool,
 

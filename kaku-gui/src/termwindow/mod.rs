@@ -1239,7 +1239,8 @@ impl TermWindow {
         // for the tab bar state.
         let show_tab_bar = config.enable_tab_bar && !config.hide_tab_bar_if_only_one_tab;
         let tab_bar_height = if show_tab_bar {
-            Self::tab_bar_pixel_height_impl(&config, &fontconfig, &render_metrics)? as usize
+            Self::tab_bar_pixel_height_impl(&config, &fontconfig, &render_metrics, false, 1)?
+                as usize
         } else {
             0
         };
@@ -2485,14 +2486,17 @@ impl TermWindow {
         )
     }
 
-    /// Decide whether the tab bar should be visible based on tab count,
-    /// fullscreen state, and config.
     fn should_show_tab_bar(&self, num_tabs: usize) -> bool {
         let is_full_screen = self.layout_is_effective_fullscreen();
         if is_full_screen {
             // Always show tab bar in fullscreen mode to display the right status (time)
             self.config.enable_tab_bar
-        } else if num_tabs == 1 {
+        } else if self.config.use_fancy_tab_bar && !self.config.tab_bar_at_bottom {
+            // Fancy tab bar on top needs to render the window controls and title,
+            // even if there is only 1 tab. The actual tabs strip will be hidden
+            // by `fancy_tab_bar.rs` instead of unmounting the entire top area.
+            self.config.enable_tab_bar
+        } else if num_tabs <= 1 {
             self.config.enable_tab_bar && !self.config.hide_tab_bar_if_only_one_tab
         } else {
             self.config.enable_tab_bar
@@ -3014,13 +3018,14 @@ impl TermWindow {
         };
         let hovered_fancy_tab_idx = if self.config.use_fancy_tab_bar {
             self.current_mouse_event.as_ref().and_then(|event| {
-                self.resolve_ui_item(event).and_then(|item| match item.item_type {
-                    UIItemType::TabBar(TabBarItem::Tab {
-                        tab_idx,
-                        active: false,
-                    }) => Some(tab_idx),
-                    _ => None,
-                })
+                self.resolve_ui_item(event)
+                    .and_then(|item| match item.item_type {
+                        UIItemType::TabBar(TabBarItem::Tab {
+                            tab_idx,
+                            active: false,
+                        }) => Some(tab_idx),
+                        _ => None,
+                    })
             })
         } else {
             None
@@ -3137,7 +3142,8 @@ impl TermWindow {
             None => title,
         };
 
-        let using_fancy_top_title_row = self.config.use_fancy_tab_bar && !self.config.tab_bar_at_bottom;
+        let using_fancy_top_title_row =
+            self.config.use_fancy_tab_bar && !self.config.tab_bar_at_bottom;
         let suppress_native_window_title = using_fancy_top_title_row
             && self
                 .config
@@ -3954,34 +3960,37 @@ impl TermWindow {
                 self.window.as_ref().unwrap().toggle_fullscreen();
             }
             ToggleAlwaysOnTop => {
-                let window = self.window.clone().unwrap();
-                let current_level = self.window_state.as_window_level();
+                if let Some(window) = self.window.clone() {
+                    let current_level = self.window_state.as_window_level();
 
-                match current_level {
-                    WindowLevel::AlwaysOnTop => {
-                        window.set_window_level(WindowLevel::Normal);
-                    }
-                    WindowLevel::AlwaysOnBottom | WindowLevel::Normal => {
-                        window.set_window_level(WindowLevel::AlwaysOnTop);
+                    match current_level {
+                        WindowLevel::AlwaysOnTop => {
+                            window.set_window_level(WindowLevel::Normal);
+                        }
+                        WindowLevel::AlwaysOnBottom | WindowLevel::Normal => {
+                            window.set_window_level(WindowLevel::AlwaysOnTop);
+                        }
                     }
                 }
             }
             ToggleAlwaysOnBottom => {
-                let window = self.window.clone().unwrap();
-                let current_level = self.window_state.as_window_level();
+                if let Some(window) = self.window.clone() {
+                    let current_level = self.window_state.as_window_level();
 
-                match current_level {
-                    WindowLevel::AlwaysOnBottom => {
-                        window.set_window_level(WindowLevel::Normal);
-                    }
-                    WindowLevel::AlwaysOnTop | WindowLevel::Normal => {
-                        window.set_window_level(WindowLevel::AlwaysOnBottom);
+                    match current_level {
+                        WindowLevel::AlwaysOnBottom => {
+                            window.set_window_level(WindowLevel::Normal);
+                        }
+                        WindowLevel::AlwaysOnTop | WindowLevel::Normal => {
+                            window.set_window_level(WindowLevel::AlwaysOnBottom);
+                        }
                     }
                 }
             }
             SetWindowLevel(level) => {
-                let window = self.window.clone().unwrap();
-                window.set_window_level(level.clone());
+                if let Some(window) = self.window.clone() {
+                    window.set_window_level(level.clone());
+                }
             }
             CopyTo(dest) => {
                 let text = self.selection_text(pane);
@@ -4813,12 +4822,15 @@ impl TermWindow {
         let should_confirm = self.config.pane_close_confirmation
             || (confirm && !pane.can_close_without_prompting(CloseReason::Pane));
         if should_confirm {
-            let window = self.window.clone().unwrap();
-            let (overlay, future) = start_overlay_pane(self, &pane, move |pane_id, term| {
-                confirm_close_pane(pane_id, term, mux_window_id, window)
-            });
-            self.assign_overlay_for_pane(pane_id, overlay);
-            promise::spawn::spawn(future).detach();
+            if let Some(window) = self.window.clone() {
+                let (overlay, future) = start_overlay_pane(self, &pane, move |pane_id, term| {
+                    confirm_close_pane(pane_id, term, mux_window_id, window)
+                });
+                self.assign_overlay_for_pane(pane_id, overlay);
+                promise::spawn::spawn(future).detach();
+            } else {
+                mux.remove_pane(pane_id);
+            }
         } else {
             mux.remove_pane(pane_id);
         }
@@ -4846,12 +4858,15 @@ impl TermWindow {
                 return;
             }
 
-            let window = self.window.clone().unwrap();
-            let (overlay, future) = start_overlay(self, &tab, move |tab_id, term| {
-                confirm_close_tab(tab_id, term, mux_window_id, window)
-            });
-            self.assign_overlay(tab_id, overlay);
-            promise::spawn::spawn(future).detach();
+            if let Some(window) = self.window.clone() {
+                let (overlay, future) = start_overlay(self, &tab, move |tab_id, term| {
+                    confirm_close_tab(tab_id, term, mux_window_id, window)
+                });
+                self.assign_overlay(tab_id, overlay);
+                promise::spawn::spawn(future).detach();
+            } else {
+                mux.remove_tab(tab_id);
+            }
         } else {
             mux.remove_tab(tab_id);
         }
@@ -4873,12 +4888,15 @@ impl TermWindow {
             // We do not record the cwd here: the user may cancel, and we cannot
             // reliably hook the async confirmation result from this call site.
             // In practice, tabs with active processes are rare to close with reopen-intent.
-            let window = self.window.clone().unwrap();
-            let (overlay, future) = start_overlay(self, &tab, move |tab_id, term| {
-                confirm_close_tab(tab_id, term, mux_window_id, window)
-            });
-            self.assign_overlay(tab_id, overlay);
-            promise::spawn::spawn(future).detach();
+            if let Some(window) = self.window.clone() {
+                let (overlay, future) = start_overlay(self, &tab, move |tab_id, term| {
+                    confirm_close_tab(tab_id, term, mux_window_id, window)
+                });
+                self.assign_overlay(tab_id, overlay);
+                promise::spawn::spawn(future).detach();
+            } else {
+                mux.remove_tab(tab_id);
+            }
         } else {
             // No confirmation needed: record cwd and close immediately.
             if let Some(pane) = tab.get_active_pane() {
