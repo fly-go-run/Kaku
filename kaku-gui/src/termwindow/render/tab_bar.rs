@@ -443,7 +443,11 @@ impl crate::TermWindow {
     ) -> anyhow::Result<f32> {
         if config.use_fancy_tab_bar {
             let font = fontconfig.title_font()?;
-            Ok((font.metrics().cell_height.get() as f32 * 1.75).ceil())
+            // Use ceiled cell_height to match RenderMetrics::with_font_metrics
+            let cell_height = font.metrics().cell_height.get().ceil() as f32;
+            let title_row_height = (cell_height * 1.4).ceil().max(28.0);
+            let tab_strip_height = (cell_height * 2.0).ceil();
+            Ok(title_row_height + tab_strip_height)
         } else {
             Ok(render_metrics.cell_size.height as f32)
         }

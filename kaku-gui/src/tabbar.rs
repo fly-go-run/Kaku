@@ -541,11 +541,14 @@ impl TabBarState {
 
     /// Build a new tab bar from the current state
     /// mouse_x is some if the mouse is on the same row as the tab bar.
+    /// hovered_tab_idx is the tab index hovered in fancy mode, derived from
+    /// pixel hit-testing rather than cell positions.
     /// title_width is the total number of cell columns in the window.
     /// window allows access to the tabs associated with the window.
     pub fn new(
         title_width: usize,
         mouse_x: Option<usize>,
+        hovered_tab_idx: Option<usize>,
         tab_info: &[TabInformation],
         pane_info: &[PaneInformation],
         is_fullscreen: bool,
@@ -676,7 +679,8 @@ impl TabBarState {
         for (tab_idx, tab_title) in tab_titles.iter().enumerate() {
             let tab_title_len = tab_title.len.min(tab_width_max);
             let active = tab_idx == active_tab_no;
-            let hover = !active && is_tab_hover(mouse_x, x, tab_title_len);
+            let hover = !active
+                && (hovered_tab_idx == Some(tab_idx) || is_tab_hover(mouse_x, x, tab_title_len));
 
             // Recompute the title so that it factors in both the hover state
             // and the adjusted maximum tab width based on available space.

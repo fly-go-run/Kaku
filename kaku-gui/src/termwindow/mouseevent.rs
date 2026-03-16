@@ -340,7 +340,7 @@ impl super::TermWindow {
         })
     }
 
-    fn resolve_ui_item(&self, event: &MouseEvent) -> Option<UIItem> {
+    pub(super) fn resolve_ui_item(&self, event: &MouseEvent) -> Option<UIItem> {
         let x = event.coords.x;
         let y = event.coords.y;
         self.ui_items

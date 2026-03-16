@@ -34,6 +34,18 @@ impl Default for VerticalAlign {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HorizontalAlign {
+    Left,
+    Center,
+}
+
+impl Default for HorizontalAlign {
+    fn default() -> HorizontalAlign {
+        HorizontalAlign::Left
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DisplayType {
     Block,
     Inline,
@@ -223,6 +235,7 @@ impl From<LinearRgba> for ResolvedColor {
 pub struct Element {
     pub item_type: Option<UIItemType>,
     pub vertical_align: VerticalAlign,
+    pub horizontal_align: HorizontalAlign,
     pub zindex: i8,
     pub display: DisplayType,
     pub float: Float,
@@ -253,6 +266,7 @@ impl Element {
             border: BoxDimension::default(),
             border_corners: None,
             vertical_align: VerticalAlign::default(),
+            horizontal_align: HorizontalAlign::default(),
             colors: ElementColors::default(),
             hover_colors: None,
             font: Rc::clone(font),
@@ -315,6 +329,11 @@ impl Element {
 
     pub fn vertical_align(mut self, align: VerticalAlign) -> Self {
         self.vertical_align = align;
+        self
+    }
+
+    pub fn horizontal_align(mut self, align: HorizontalAlign) -> Self {
+        self.horizontal_align = align;
         self
     }
 
@@ -584,11 +603,9 @@ impl super::TermWindow {
         let border_and_padding_width = border.left + border.right + padding.left + padding.right;
 
         let max_width = match element.max_width {
-            Some(w) => {
-                w.evaluate_as_pixels(context.width)
-                    .min(context.bounds.width())
-                    - border_and_padding_width
-            }
+            Some(w) => w
+                .evaluate_as_pixels(context.width)
+                .min(context.bounds.width() - border_and_padding_width),
             None => context.bounds.width() - border_and_padding_width,
         }
         .min((context.width.pixel_max - context.bounds.min_x()) - border_and_padding_width);
@@ -742,8 +759,14 @@ impl super::TermWindow {
                     computed_kids.push(kid);
                 }
 
-                // Respect min-width
+                // Respect min-width; compute centering offset before adjustment
+                let content_width = max_x;
                 max_x = max_x.max(min_width);
+
+                let h_center_offset = match element.horizontal_align {
+                    HorizontalAlign::Center => (max_x - content_width).max(0.) / 2.0,
+                    HorizontalAlign::Left => 0.0,
+                };
 
                 let mut float_max_x = (max_x + float_width).min(max_width);
 
@@ -756,6 +779,9 @@ impl super::TermWindow {
                             let x = float_max_x - kid.bounds.width();
                             float_max_x -= kid.bounds.width();
                             kid.translate(euclid::vec2(x, 0.));
+                        }
+                        Float::None if h_center_offset > 0. => {
+                            kid.translate(euclid::vec2(h_center_offset, 0.));
                         }
                         _ => {}
                     }

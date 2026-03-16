@@ -3012,14 +3012,38 @@ impl TermWindow {
             }
             None => false,
         };
+        let hovered_fancy_tab_idx = if self.config.use_fancy_tab_bar {
+            self.current_mouse_event.as_ref().and_then(|event| {
+                self.resolve_ui_item(event).and_then(|item| match item.item_type {
+                    UIItemType::TabBar(TabBarItem::Tab {
+                        tab_idx,
+                        active: false,
+                    }) => Some(tab_idx),
+                    _ => None,
+                })
+            })
+        } else {
+            None
+        };
+        let hovering_fancy_tab_bar_item = if self.config.use_fancy_tab_bar {
+            self.current_mouse_event.as_ref().is_some_and(|event| {
+                matches!(
+                    self.resolve_ui_item(event).map(|item| item.item_type),
+                    Some(UIItemType::TabBar(_))
+                )
+            })
+        } else {
+            false
+        };
 
         let new_tab_bar = TabBarState::new(
             self.dimensions.pixel_width / self.render_metrics.cell_size.width as usize,
-            if hovering_in_tab_bar {
+            if hovering_in_tab_bar && !self.config.use_fancy_tab_bar {
                 Some(self.last_mouse_coords.0)
             } else {
                 None
             },
+            hovered_fancy_tab_idx,
             &tabs,
             &panes,
             self.layout_is_effective_fullscreen(),
@@ -3032,6 +3056,16 @@ impl TermWindow {
             self.tab_bar = new_tab_bar;
             self.invalidate_fancy_tab_bar();
             self.invalidate_modal();
+            if let Some(window) = self.window.as_ref() {
+                window.invalidate();
+            }
+        } else if self.config.use_fancy_tab_bar
+            && (hovering_fancy_tab_bar_item || hovering_in_tab_bar)
+        {
+            // Fancy tab bar hover is handled by element-level hover_colors
+            // in render_element, so we need to redraw when mouse moves in
+            // the tab bar area even though tab bar content hasn't changed.
+            self.invalidate_fancy_tab_bar();
             if let Some(window) = self.window.as_ref() {
                 window.invalidate();
             }
@@ -3103,8 +3137,28 @@ impl TermWindow {
             None => title,
         };
 
+        let using_fancy_top_title_row = self.config.use_fancy_tab_bar && !self.config.tab_bar_at_bottom;
+        let suppress_native_window_title = using_fancy_top_title_row
+            && self
+                .config
+                .window_decorations
+                .contains(WindowDecorations::INTEGRATED_BUTTONS)
+            && self.config.integrated_title_button_style == IntegratedTitleButtonStyle::MacOsNative;
+
         if let Some(window) = self.window.as_ref().cloned() {
-            window.set_title(&title);
+            if using_fancy_top_title_row {
+                // The two-layer fancy top tab bar renders its own title row.
+                // Rebuild it on title/status updates even when TabBarState itself
+                // hasn't changed, otherwise the custom title can go stale or stay blank.
+                self.invalidate_fancy_tab_bar();
+                window.invalidate();
+            }
+
+            window.set_title(if suppress_native_window_title {
+                ""
+            } else {
+                &title
+            });
 
             // If the number of tabs changed and caused the tab bar to
             // hide/show, then we'll need to resize things. We only update

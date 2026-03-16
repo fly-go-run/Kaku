@@ -2242,7 +2242,7 @@ fn default_enq_answerback() -> String {
 }
 
 fn default_tab_max_width() -> usize {
-    16
+    48
 }
 
 fn default_update_interval() -> u64 {
