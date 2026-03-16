@@ -861,9 +861,10 @@ pub(super) fn load_persisted_font_scale(config: &ConfigHandle) -> Option<f64> {
 
 /// Visual spacing adjustment for tab bar layouts.
 const VISUAL_SPACING: usize = 4;
-/// When the top tab bar is visible, slightly tighten the top content gap so
-/// the first terminal row doesn't feel too far from the tab strip.
-const TOP_TAB_VISIBLE_TOP_TIGHTENING: usize = 6;
+/// Keep a compact but non-zero gap below a visible top tab bar. The tab bar
+/// already reserves its own height, so carrying the full managed top padding
+/// here makes the first terminal row feel detached from the strip.
+const TOP_TAB_VISIBLE_CONTENT_GAP: usize = 8;
 /// Bottom gap for top-tab layouts when the tab bar is **hidden** (single-tab,
 /// hide-if-only-one-tab mode). A larger value gives comfortable breathing room
 /// when no bar occupies the top of the window.
@@ -948,8 +949,8 @@ fn effective_top_padding(base_top: usize, default_top: usize) -> usize {
 
 /// Computes vertical padding used for layout.
 /// Bottom-tab layouts subtract the tab bar height from bottom padding so the
-/// content block remains stable. Top-tab layouts preserve the full top padding
-/// so the gap below the tab bar matches the no-tab baseline.
+/// content block remains stable. Top-tab layouts use a compact content gap
+/// below the bar because the bar already reserves its own vertical space.
 pub fn effective_vertical_padding(
     config: &Config,
     context: DimensionContext,
@@ -975,7 +976,7 @@ fn effective_vertical_padding_with_policy(
     show_tab_bar: bool,
     tab_bar_at_bottom: bool,
     tab_bar_height: usize,
-    is_fullscreen: bool,
+    _is_fullscreen: bool,
     user_has_custom_padding: bool,
 ) -> (usize, usize) {
     let base_top = config.window_padding.top.evaluate_as_pixels(context) as usize;
@@ -984,26 +985,19 @@ fn effective_vertical_padding_with_policy(
         .top
         .evaluate_as_pixels(context) as usize;
 
-    let hide_title_row = is_fullscreen && config.hide_title_bar_in_full_screen;
-
     // Respect explicit user padding and only apply Kaku's visual heuristics
     // for the managed/default padding path.
-    let mut top = if user_has_custom_padding || hide_title_row {
+    let top = if user_has_custom_padding {
         base_top
+    } else if show_tab_bar && !tab_bar_at_bottom {
+        TOP_TAB_VISIBLE_CONTENT_GAP
     } else {
         effective_top_padding(base_top, default_top)
     };
     let mut bottom = base_bottom;
 
-    // Top-tab visible mode uses a slightly tighter top gap than hidden mode.
-    if !user_has_custom_padding && show_tab_bar && !tab_bar_at_bottom && !hide_title_row {
-        top = top.saturating_sub(TOP_TAB_VISIBLE_TOP_TIGHTENING);
-    }
-
     // Bottom-tab layouts subtract the tab bar height from bottom padding to
-    // keep the content block stable. For top-tab layouts we intentionally keep
-    // the full top padding so the tab bar gets the same breathing room as the
-    // no-tab case.
+    // keep the content block stable.
     if show_tab_bar {
         if tab_bar_at_bottom {
             bottom = bottom.saturating_sub(tab_bar_height);
@@ -1162,15 +1156,12 @@ mod tests {
     fn top_tab_bar_visible_adjusts_top_and_bottom_padding() {
         let config = ConfigHandle::default_config();
         let tab_bar_height = 24;
-        let (base_top, base_bottom) = base_vertical_padding(&config);
+        let (_, base_bottom) = base_vertical_padding(&config);
 
         let (with_tab_top, with_tab_bottom) =
             effective_vertical_padding(&config, context(), true, false, tab_bar_height, false);
 
-        assert_eq!(
-            with_tab_top,
-            base_top + super::VISUAL_SPACING - super::TOP_TAB_VISIBLE_TOP_TIGHTENING
-        );
+        assert_eq!(with_tab_top, super::TOP_TAB_VISIBLE_CONTENT_GAP);
         assert_eq!(
             with_tab_bottom,
             base_bottom.max(super::TOP_TAB_VISIBLE_BOTTOM_GAP)
@@ -1186,10 +1177,8 @@ mod tests {
         let (visible_top, visible_bottom) =
             effective_vertical_padding(&config, context(), true, false, 24, false);
 
-        assert_eq!(
-            visible_top + super::TOP_TAB_VISIBLE_TOP_TIGHTENING,
-            hidden_top
-        );
+        assert_eq!(visible_top, super::TOP_TAB_VISIBLE_CONTENT_GAP);
+        assert!(visible_top < hidden_top);
         assert_eq!(visible_bottom, hidden_bottom);
     }
 
@@ -1219,8 +1208,10 @@ mod tests {
         let config = ConfigHandle::default_config();
         let base_bottom = config.window_padding.bottom.evaluate_as_pixels(context()) as usize;
 
-        let (_, bottom) = effective_vertical_padding(&config, context(), true, false, 24, true);
+        let (top, bottom) =
+            effective_vertical_padding(&config, context(), true, false, 24, true);
 
+        assert_eq!(top, super::TOP_TAB_VISIBLE_CONTENT_GAP);
         assert_eq!(bottom, base_bottom.max(super::TOP_TAB_VISIBLE_BOTTOM_GAP));
     }
 
