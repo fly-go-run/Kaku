@@ -1204,7 +1204,7 @@ mod tests {
     }
 
     #[test]
-    fn fullscreen_top_tab_bar_visible_uses_full_gap() {
+    fn fullscreen_top_tab_bar_visible_uses_compact_top_gap() {
         let config = ConfigHandle::default_config();
         let base_bottom = config.window_padding.bottom.evaluate_as_pixels(context()) as usize;
 
@@ -1216,7 +1216,7 @@ mod tests {
     }
 
     #[test]
-    fn custom_padding_skips_fullscreen_top_tightening() {
+    fn custom_padding_preserves_fullscreen_top_padding() {
         let mut config = Config::default_config();
         config.window_padding.top = config::Dimension::Pixels(40.0);
 
@@ -1227,7 +1227,7 @@ mod tests {
     }
 
     #[test]
-    fn custom_padding_skips_top_tab_visible_top_tightening() {
+    fn custom_padding_preserves_top_tab_visible_top_padding() {
         let mut config = Config::default_config();
         config.window_padding.top = config::Dimension::Pixels(24.0);
 
